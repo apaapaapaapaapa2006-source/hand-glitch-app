@@ -1,0 +1,917 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Hand Glitch Panels</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #000;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    color: #fff;
+    -webkit-user-select: none;
+    user-select: none;
+    touch-action: none;
+  }
+  #stage {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #000;
+  }
+  #video {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transform: scaleX(-1);
+    z-index: 1;
+  }
+  #panels {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 2;
+    pointer-events: none;
+  }
+  #overlay {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 3;
+    pointer-events: none;
+  }
+  #ui {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    right: 12px;
+    z-index: 10;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 8px;
+    pointer-events: none;
+  }
+  .badge {
+    background: rgba(0,0,0,0.55);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border: 1px solid rgba(255,255,255,0.15);
+    padding: 6px 10px;
+    border-radius: 8px;
+    font-size: 11px;
+    line-height: 1.4;
+    pointer-events: auto;
+  }
+  #controls {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    align-items: flex-end;
+  }
+  button {
+    background: rgba(255,255,255,0.1);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border: 1px solid rgba(255,255,255,0.25);
+    color: #fff;
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 12px;
+    cursor: pointer;
+    pointer-events: auto;
+    font-family: inherit;
+  }
+  button:active { background: rgba(255,255,255,0.25); }
+  #start {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 20;
+    background: rgba(255,255,255,0.1);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255,255,255,0.3);
+    padding: 18px 28px;
+    border-radius: 14px;
+    font-size: 16px;
+    text-align: center;
+    cursor: pointer;
+  }
+  #start .sub { font-size: 11px; opacity: 0.7; margin-top: 6px; }
+  #start.hidden { display: none; }
+  #err {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    background: rgba(255,30,30,0.8);
+    padding: 12px 18px;
+    border-radius: 10px;
+    font-size: 13px;
+    z-index: 30;
+    text-align: center;
+    max-width: 80%;
+    display: none;
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="video" playsinline muted autoplay></video>
+  <canvas id="panels"></canvas>
+  <canvas id="overlay"></canvas>
+  <div id="ui">
+    <div class="badge" id="info">手をかざしてください</div>
+    <div id="controls">
+      <button id="snap">📸 撮影</button>
+      <button id="clear">🗑 クリア</button>
+      <button id="layout">▦ レイアウト</button>
+      <button id="mode">モード: 通常</button>
+    </div>
+  </div>
+  <div id="start">
+    🖐 タップして開始
+    <div class="sub">カメラへのアクセスを許可してください<br>両手を画面にかざすと反応します</div>
+  </div>
+  <div id="err"></div>
+</div>
+
+<script type="module">
+import {
+  HandLandmarker,
+  FilesetResolver
+} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9/vision_bundle.mjs";
+
+const video = document.getElementById('video');
+const panelsCanvas = document.getElementById('panels');
+const overlayCanvas = document.getElementById('overlay');
+const pCtx = panelsCanvas.getContext('2d');
+const oCtx = overlayCanvas.getContext('2d');
+const startBtn = document.getElementById('start');
+const infoEl = document.getElementById('info');
+const snapBtn = document.getElementById('snap');
+const clearBtn = document.getElementById('clear');
+const modeBtn = document.getElementById('mode');
+const layoutBtn = document.getElementById('layout');
+const errEl = document.getElementById('err');
+
+let handLandmarker = null;
+let running = false;
+let mode = 0; // 0: normal, 1: heavy glitch, 2: minimal
+const modeNames = ['通常', 'グリッチ強', 'ミニマル'];
+
+// 接続線(MediaPipe Hand connections)
+const HAND_CONNECTIONS = [
+  [0,1],[1,2],[2,3],[3,4],
+  [0,5],[5,6],[6,7],[7,8],
+  [5,9],[9,10],[10,11],[11,12],
+  [9,13],[13,14],[14,15],[15,16],
+  [13,17],[17,18],[18,19],[19,20],
+  [0,17]
+];
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  for (const c of [panelsCanvas, overlayCanvas]) {
+    c.width = w * dpr;
+    c.height = h * dpr;
+    c.style.width = w + 'px';
+    c.style.height = h + 'px';
+  }
+  pCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  oCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+function showErr(msg) {
+  errEl.textContent = msg;
+  errEl.style.display = 'block';
+}
+
+async function setupCamera() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: {
+      facingMode: 'user',
+      width: { ideal: 1280 },
+      height: { ideal: 720 }
+    },
+    audio: false
+  });
+  video.srcObject = stream;
+  await new Promise(res => video.onloadedmetadata = res);
+  await video.play();
+}
+
+async function setupHandLandmarker() {
+  const vision = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9/wasm"
+  );
+  handLandmarker = await HandLandmarker.createFromOptions(vision, {
+    baseOptions: {
+      modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+      delegate: "GPU"
+    },
+    runningMode: "VIDEO",
+    numHands: 2,
+    minHandDetectionConfidence: 0.5,
+    minHandPresenceConfidence: 0.5,
+    minTrackingConfidence: 0.5
+  });
+}
+
+// パネル(浮かぶ画像/カラーレイヤー)管理
+const panels = [];
+const MAX_PANELS = 24;
+
+function makePanel() {
+  const set = PALETTE_SETS[currentSet];
+  const pal = set.palettes[Math.floor(Math.random() * set.palettes.length)];
+  const types = set.types;
+  return {
+    type: types[Math.floor(Math.random() * types.length)],
+    color: pal[0],
+    bg: pal[1],
+    seed: Math.random() * 10000,
+    rotation: (Math.random() - 0.5) * 0.4,
+    skew: (Math.random() - 0.5) * 0.3,
+    aspect: 0.5 + Math.random() * 1.2,
+    life: 1.0,
+    born: performance.now()
+  };
+}
+
+// オフスクリーンキャンバスでパネル描画(キャッシュ)
+const panelCache = new Map();
+function getPanelTexture(panel, w, h) {
+  const key = `${panel.type}_${panel.seed}_${Math.round(w)}_${Math.round(h)}`;
+  if (panelCache.has(key)) return panelCache.get(key);
+  const c = document.createElement('canvas');
+  c.width = Math.max(2, Math.round(w));
+  c.height = Math.max(2, Math.round(h));
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = panel.bg;
+  ctx.fillRect(0, 0, c.width, c.height);
+
+  const rng = mulberry32(Math.floor(panel.seed));
+  switch (panel.type) {
+    case 'stripes': {
+      const stripeH = 4 + rng() * 12;
+      for (let y = 0; y < c.height; y += stripeH) {
+        ctx.fillStyle = rng() > 0.5 ? panel.color : panel.bg;
+        ctx.fillRect(0, y, c.width, stripeH);
+      }
+      break;
+    }
+    case 'noise': {
+      const img = ctx.createImageData(c.width, c.height);
+      const fg = hexToRgb(panel.color);
+      const bg = hexToRgb(panel.bg);
+      for (let i = 0; i < img.data.length; i += 4) {
+        const t = rng();
+        img.data[i]   = t > 0.5 ? fg.r : bg.r;
+        img.data[i+1] = t > 0.5 ? fg.g : bg.g;
+        img.data[i+2] = t > 0.5 ? fg.b : bg.b;
+        img.data[i+3] = 255;
+      }
+      ctx.putImageData(img, 0, 0);
+      break;
+    }
+    case 'blocks': {
+      const cols = 4 + Math.floor(rng() * 8);
+      const rows = 4 + Math.floor(rng() * 8);
+      const cw = c.width / cols;
+      const ch = c.height / rows;
+      for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+          ctx.fillStyle = rng() > 0.5 ? panel.color : panel.bg;
+          ctx.fillRect(x * cw, y * ch, cw + 1, ch + 1);
+        }
+      }
+      break;
+    }
+    case 'glitch': {
+      ctx.fillStyle = panel.color;
+      ctx.fillRect(0, 0, c.width, c.height);
+      const lines = 6 + Math.floor(rng() * 10);
+      for (let i = 0; i < lines; i++) {
+        ctx.fillStyle = rng() > 0.5 ? panel.bg : '#ffffff';
+        const y = rng() * c.height;
+        ctx.fillRect(0, y, c.width, 1 + rng() * 4);
+      }
+      // RGB split風の縦線
+      for (let i = 0; i < 3; i++) {
+        ctx.fillStyle = ['#ff0044', '#00ff88', '#0088ff'][i];
+        ctx.fillRect(rng() * c.width, 0, 2, c.height);
+      }
+      break;
+    }
+    case 'solid': {
+      ctx.fillStyle = panel.color;
+      ctx.fillRect(0, 0, c.width, c.height);
+      break;
+    }
+    case 'gradient': {
+      const g = ctx.createLinearGradient(0, 0, c.width, c.height);
+      g.addColorStop(0, panel.color);
+      g.addColorStop(1, panel.bg);
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, c.width, c.height);
+      break;
+    }
+  }
+  // 軽くキャッシュサイズ制限
+  if (panelCache.size > 200) {
+    const firstKey = panelCache.keys().next().value;
+    panelCache.delete(firstKey);
+  }
+  panelCache.set(key, c);
+  return c;
+}
+
+function hexToRgb(h) {
+  const m = h.replace('#','');
+  return {
+    r: parseInt(m.substring(0,2), 16),
+    g: parseInt(m.substring(2,4), 16),
+    b: parseInt(m.substring(4,6), 16)
+  };
+}
+
+function mulberry32(a) {
+  return function() {
+    var t = a += 0x6D2B79F5;
+    t = Math.imul(t ^ t >>> 15, t | 1);
+    t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// 両手の最新ランドマーク
+let leftHand = null, rightHand = null;
+let lastSpawn = 0;
+
+// フェーズ管理
+// 0: IDLE / 1: CLUSTER(集まって回転) / 2: LINE(一列) / 3: CLOUD(四角群) / 4: STRIP(細い帯)
+const PHASE_NAMES = ['IDLE', 'CLUSTER', 'LINE', 'CLOUD', 'STRIP'];
+let phase = 0;
+let phaseT = 0; // フェーズ内の経過時間
+let clusterAngle = 0; // CLUSTERの回転角
+
+// 手間距離の履歴(速度判定用)
+let distHistory = [];
+const DIST_HISTORY_LEN = 8;
+
+// 画像セット(手のひら/甲で切り替わるパレット群)
+const PALETTE_SETS = [
+  { // セット0: ネオン
+    name: 'NEON',
+    palettes: [
+      ['#00ff88', '#003322'],
+      ['#ff00aa', '#220022'],
+      ['#00aaff', '#001144'],
+      ['#aa00ff', '#220044']
+    ],
+    types: ['stripes', 'glitch', 'blocks']
+  },
+  { // セット1: ウォーム
+    name: 'WARM',
+    palettes: [
+      ['#ffee00', '#553300'],
+      ['#ff5500', '#220000'],
+      ['#ff0044', '#330011'],
+      ['#ffaa00', '#332200']
+    ],
+    types: ['gradient', 'stripes', 'solid']
+  },
+  { // セット2: モノクロ
+    name: 'MONO',
+    palettes: [
+      ['#ffffff', '#000000'],
+      ['#cccccc', '#222222'],
+      ['#888888', '#111111']
+    ],
+    types: ['noise', 'blocks', 'glitch']
+  },
+  { // セット3: アクア
+    name: 'AQUA',
+    palettes: [
+      ['#00ffcc', '#003344'],
+      ['#00ddff', '#002244'],
+      ['#88ffee', '#114455']
+    ],
+    types: ['gradient', 'stripes', 'noise']
+  }
+];
+let currentSet = 0; // パネル生成用のセット
+
+// 展開レイアウトの種類
+const LAYOUTS = ['LINE', 'STACK3D', 'COLUMN', 'CROSS', 'RING'];
+const LAYOUT_NAMES = {
+  LINE:    '▦ 横一列',
+  STACK3D: '🎴 3Dスタック',
+  COLUMN:  '┃ 縦一列',
+  CROSS:   '✕ クロス',
+  RING:    '◯ 円環'
+};
+let currentLayout = 0; // インデックス
+
+// レイアウト遷移時の補間用(前のレイアウトと現在のレイアウトをブレンド)
+let prevLayout = 0;
+let layoutTransition = 1; // 0=前のレイアウト, 1=現レイアウト
+
+// 手の状態(true: 手のひら / false: 甲)
+let palmL = true, palmR = true;
+let prevPalmL = true, prevPalmR = true;
+let flipCooldown = 0;
+
+// 手のひら/甲判定: 手首(0), 人差し指根(5), 小指根(17) の三角形の向き
+function isPalmFacing(landmarks, handednessLabel) {
+  const p0 = landmarks[0], p5 = landmarks[5], p17 = landmarks[17];
+  const v1x = p5.x - p0.x, v1y = p5.y - p0.y;
+  const v2x = p17.x - p0.x, v2y = p17.y - p0.y;
+  const cross = v1x * v2y - v1y * v2x;
+  // MediaPipeのhandednessは元映像基準
+  // 映像内Right手(=ユーザーから見て左手)のとき手のひらが見えてると cross < 0
+  // 映像内Left手(=ユーザーから見て右手)のとき手のひらが見えてると cross > 0
+  if (handednessLabel === 'Right') return cross < 0;
+  return cross > 0;
+}
+
+function update(dt, now) {
+  phaseT += dt;
+  clusterAngle += dt * 0.003;
+
+  if (leftHand && rightHand) {
+    // 両手のパーム中央
+    const lp = palmCenter(leftHand);
+    const rp = palmCenter(rightHand);
+    const W = panelsCanvas.width / (window.devicePixelRatio || 1);
+    const H = panelsCanvas.height / (window.devicePixelRatio || 1);
+    const lx = (1 - lp.x) * W, ly = lp.y * H;
+    const rx = (1 - rp.x) * W, ry = rp.y * H;
+    const distance = Math.sqrt((rx-lx)**2 + (ry-ly)**2);
+
+    // 距離履歴更新
+    distHistory.push({ d: distance, t: now });
+    while (distHistory.length > DIST_HISTORY_LEN) distHistory.shift();
+    // 速度(距離変化率)
+    let speed = 0;
+    if (distHistory.length >= 2) {
+      const a = distHistory[0], b = distHistory[distHistory.length-1];
+      const dtTotal = b.t - a.t;
+      if (dtTotal > 0) speed = (b.d - a.d) / dtTotal; // px/ms 正=広がる, 負=縮む
+    }
+
+    const screenSize = Math.min(W, H);
+    const distRatio = distance / screenSize; // 画面に対する距離比
+
+    // フェーズ遷移ロジック
+    if (phase === 0) {
+      // IDLE -> CLUSTER: 両手が近くにある(距離小)
+      if (distRatio < 0.35 && phaseT > 200) {
+        phase = 1; phaseT = 0;
+      }
+    } else if (phase === 1) {
+      // CLUSTER -> LINE: 急速に手を広げる(速度大の正)
+      if (speed > 0.5 && distRatio > 0.4 && phaseT > 400) {
+        phase = 2; phaseT = 0;
+      }
+    } else if (phase === 2) {
+      // LINE -> CLOUD: 一定時間広げた状態が続く
+      if (phaseT > 1500 && distRatio > 0.4) {
+        phase = 3; phaseT = 0;
+      }
+    } else if (phase === 3) {
+      // CLOUD -> STRIP: さらに時間経過 or 手の角度変化
+      if (phaseT > 1500) {
+        phase = 4; phaseT = 0;
+      }
+    } else if (phase === 4) {
+      // STRIP -> 一定時間後にCLUSTERへ戻る(ループ)
+      if (phaseT > 2000) {
+        phase = 1; phaseT = 0;
+      }
+      // 手を急速に離すとIDLEへ
+      if (distRatio > 0.7) {
+        phase = 0; phaseT = 0;
+      }
+    }
+  } else {
+    // 両手が検出されない時はIDLEへフェードバック
+    if (phaseT > 800) {
+      phase = 0;
+    }
+  }
+
+  // パネル生成(フェーズに応じて)
+  if (leftHand && rightHand && phase > 0) {
+    const spawnInterval = mode === 1 ? 25 : mode === 2 ? 100 : 50;
+    if (now - lastSpawn > spawnInterval) {
+      lastSpawn = now;
+      const p = makePanel();
+      panels.push(p);
+      if (panels.length > MAX_PANELS) panels.shift();
+    }
+  }
+  // ライフ更新(フェーズで減衰速度可変)
+  const decay = phase === 0 ? 0.0015 : 0.0002;
+  for (const p of panels) {
+    p.life -= dt * decay;
+  }
+  for (let i = panels.length - 1; i >= 0; i--) {
+    if (panels[i].life <= 0) panels.splice(i, 1);
+  }
+
+  // レイアウト遷移補間 0→1 を約700msで
+  if (layoutTransition < 1) {
+    layoutTransition = Math.min(1, layoutTransition + dt / 700);
+  }
+}
+
+// 各レイアウトのパネル位置を計算する関数
+// 返値: { x, y, rot, w, h }
+function computeLayout(layoutName, i, n, p, ctx) {
+  const { lx, ly, rx, ry, dx, dy, distance, angle, cx, cy, now } = ctx;
+  const ti = n > 1 ? (i / (n - 1)) : 0.5;
+  const margin = 0.08;
+
+  switch (layoutName) {
+    case 'LINE': {
+      // 両手の間を等間隔に縦短冊で並ぶ
+      const t = margin + (1 - 2 * margin) * ti;
+      const x = lx + dx * t;
+      const y = ly + dy * t;
+      const rot = angle + Math.PI / 2;
+      const w = Math.max(6, (distance * (1 - 2 * margin)) / Math.max(n, 1) * 1.05);
+      const h = distance * 0.45;
+      return { x, y, rot, w, h };
+    }
+    case 'STACK3D': {
+      // 手前から奥へカードが斜めに重なる擬似3D
+      // 両手のうち手のひらが見えている側を「手前」、もう一方を「奥」とする
+      const t = ti;
+      // 軌道は手の間の直線だが、奥行きに応じてスケール縮小
+      const baseX = lx + dx * t;
+      const baseY = ly + dy * t;
+      // 奥行き感: 進むほど少し上にずれて、サイズが小さくなる
+      const depthShift = Math.sin(angle + Math.PI/2) * t * distance * 0.15;
+      const x = baseX + Math.cos(angle + Math.PI/2) * t * distance * 0.05;
+      const y = baseY + depthShift * 0.3;
+      const scale = 1 - t * 0.55;
+      const rot = angle + Math.PI / 2 + (p.seed % 0.3 - 0.15);
+      const w = distance * 0.28 * scale * p.aspect;
+      const h = distance * 0.42 * scale;
+      return { x, y, rot, w, h };
+    }
+    case 'COLUMN': {
+      // 中心を軸に縦方向に積む(水平な短冊が縦に並ぶ)
+      const total = distance * 1.1;
+      const y = cy + (ti - 0.5) * total;
+      const x = cx + Math.sin(p.seed * 5 + now * 0.0008) * distance * 0.05;
+      const rot = angle; // 手と手の方向と同じ向きの横短冊
+      const w = distance * 0.55;
+      const h = Math.max(6, total / Math.max(n, 1) * 1.05);
+      return { x, y, rot, w, h };
+    }
+    case 'CROSS': {
+      // クロス: 偶数番は手の線、奇数番は垂直線に配置
+      const onMain = (i % 2 === 0);
+      if (onMain) {
+        const t = margin + (1 - 2 * margin) * ((i / 2) / Math.max(1, Math.floor(n/2)));
+        const x = lx + dx * t;
+        const y = ly + dy * t;
+        const rot = angle + Math.PI / 2;
+        const w = Math.max(6, (distance * 0.85) / Math.max(n/2, 1) * 1.05);
+        const h = distance * 0.4;
+        return { x, y, rot, w, h };
+      } else {
+        const t = margin + (1 - 2 * margin) * (((i-1) / 2) / Math.max(1, Math.floor(n/2)));
+        // 垂直方向
+        const px = cx + Math.cos(angle + Math.PI/2) * (t - 0.5) * distance * 0.9;
+        const py = cy + Math.sin(angle + Math.PI/2) * (t - 0.5) * distance * 0.9;
+        const rot = angle;
+        const w = Math.max(6, (distance * 0.85) / Math.max(n/2, 1) * 1.05);
+        const h = distance * 0.4;
+        return { x: px, y: py, rot, w, h };
+      }
+    }
+    case 'RING': {
+      // 円環: 両手の中心を中心に円配置
+      const radius = distance * 0.45;
+      const baseAngle = angle + Math.PI / 2; // 円の0度位置を手の線に垂直に
+      const theta = baseAngle + (ti * Math.PI * 2);
+      const x = cx + Math.cos(theta) * radius;
+      const y = cy + Math.sin(theta) * radius;
+      const rot = theta + Math.PI / 2; // 中心を向く
+      const w = distance * 0.18 * p.aspect;
+      const h = distance * 0.28;
+      return { x, y, rot, w, h };
+    }
+  }
+  // フォールバック
+  return { x: cx, y: cy, rot: 0, w: 40, h: 60 };
+}
+
+function drawPanels() {
+  const W = panelsCanvas.width / (window.devicePixelRatio || 1);
+  const H = panelsCanvas.height / (window.devicePixelRatio || 1);
+  pCtx.clearRect(0, 0, W, H);
+
+  if (!leftHand || !rightHand) return;
+
+  // 両手のパーム中央
+  const lp = palmCenter(leftHand);
+  const rp = palmCenter(rightHand);
+  const lx = (1 - lp.x) * W, ly = lp.y * H;
+  const rx = (1 - rp.x) * W, ry = rp.y * H;
+
+  const dx = rx - lx, dy = ry - ly;
+  const distance = Math.sqrt(dx*dx + dy*dy);
+  const angle = Math.atan2(dy, dx);
+  const cx = (lx + rx) / 2;
+  const cy = (ly + ry) / 2;
+
+  // 塊⇔展開 の補間
+  const screenDiag = Math.sqrt(W*W + H*H);
+  const t0 = 0.25, t1 = 0.55;
+  const normD = distance / screenDiag;
+  let spreadT = (normD - t0) / (t1 - t0);
+  spreadT = Math.max(0, Math.min(1, spreadT));
+  spreadT = spreadT * spreadT * (3 - 2 * spreadT);
+
+  const now = performance.now();
+  const n = panels.length;
+
+  // レイアウト遷移の補間(easeInOut)
+  const lt = layoutTransition;
+  const layoutBlend = lt * lt * (3 - 2 * lt);
+
+  const ctxObj = { lx, ly, rx, ry, dx, dy, distance, angle, cx, cy, now };
+
+  // 描画順: 3Dスタックでは奥(i=n-1)から描く必要があるので分ける
+  const layoutName = LAYOUTS[currentLayout];
+  const prevLayoutName = LAYOUTS[prevLayout];
+  const indices = [...Array(n).keys()];
+  if (layoutName === 'STACK3D' || prevLayoutName === 'STACK3D') {
+    indices.reverse(); // 奥から描画
+  }
+
+  for (const i of indices) {
+    const p = panels[i];
+    const ti = n > 1 ? (i / (n - 1)) : 0.5;
+
+    // === 塊モード: 円軌道でゆっくり回転 ===
+    const orbitRadius = distance * 0.18 + 20 + (i % 5) * 8;
+    const orbitSpeed = 0.0006 + (i % 7) * 0.00008;
+    const orbitAngle = p.seed + now * orbitSpeed;
+    const clusterX = cx + Math.cos(orbitAngle) * orbitRadius * Math.cos(i * 0.7);
+    const clusterY = cy + Math.sin(orbitAngle) * orbitRadius * 0.6;
+    const clusterRot = orbitAngle * 0.5 + p.rotation;
+    const clusterW = distance * (0.35 + Math.sin(p.seed * 1.7) * 0.15) * p.aspect;
+    const clusterH = distance * (0.45 + Math.cos(p.seed * 2.3) * 0.15);
+
+    // === 現在のレイアウトと前のレイアウトを補間 ===
+    const cur  = computeLayout(layoutName, i, n, p, ctxObj);
+    const prev = computeLayout(prevLayoutName, i, n, p, ctxObj);
+    const layoutX = prev.x * (1 - layoutBlend) + cur.x * layoutBlend;
+    const layoutY = prev.y * (1 - layoutBlend) + cur.y * layoutBlend;
+    const layoutR = prev.rot * (1 - layoutBlend) + cur.rot * layoutBlend;
+    const layoutW = prev.w * (1 - layoutBlend) + cur.w * layoutBlend;
+    const layoutH = prev.h * (1 - layoutBlend) + cur.h * layoutBlend;
+
+    // 塊⇔展開 の補間
+    const px = clusterX * (1 - spreadT) + layoutX * spreadT;
+    const py = clusterY * (1 - spreadT) + layoutY * spreadT;
+    const rot = clusterRot * (1 - spreadT) + layoutR * spreadT;
+    const w = clusterW * (1 - spreadT) + layoutW * spreadT;
+    const h = clusterH * (1 - spreadT) + layoutH * spreadT;
+
+    const tex = getPanelTexture(p, w, h);
+
+    pCtx.save();
+    pCtx.translate(px, py);
+    pCtx.rotate(rot);
+    pCtx.globalAlpha = Math.max(0, Math.min(1, p.life));
+    pCtx.shadowColor = 'rgba(0,0,0,0.5)';
+    pCtx.shadowBlur = 10;
+    pCtx.shadowOffsetX = 2;
+    pCtx.shadowOffsetY = 4;
+    pCtx.drawImage(tex, -w/2, -h/2, w, h);
+    pCtx.restore();
+
+    if (mode === 1 && Math.random() < 0.12) {
+      pCtx.save();
+      pCtx.globalCompositeOperation = 'screen';
+      pCtx.globalAlpha = 0.3;
+      pCtx.translate(px + (Math.random()-0.5)*8, py);
+      pCtx.rotate(rot);
+      pCtx.fillStyle = '#ff0044';
+      pCtx.fillRect(-w/2, -h/2, w, h);
+      pCtx.restore();
+    }
+  }
+
+  // 手と手をつなぐ白い線
+  pCtx.strokeStyle = 'rgba(255,255,255,0.85)';
+  pCtx.lineWidth = 1.5;
+  pCtx.beginPath();
+  pCtx.moveTo(lx, ly);
+  pCtx.lineTo(rx, ry);
+  pCtx.stroke();
+
+  drawPanels._spreadT = spreadT;
+}
+
+function palmCenter(landmarks) {
+  // 0: 手首, 5,9,13,17: 各指の付け根 の平均
+  const idx = [0, 5, 9, 13, 17];
+  let x = 0, y = 0;
+  for (const i of idx) { x += landmarks[i].x; y += landmarks[i].y; }
+  return { x: x / idx.length, y: y / idx.length };
+}
+
+function drawHandOverlay() {
+  const W = overlayCanvas.width / (window.devicePixelRatio || 1);
+  const H = overlayCanvas.height / (window.devicePixelRatio || 1);
+  oCtx.clearRect(0, 0, W, H);
+
+  for (const hand of [leftHand, rightHand]) {
+    if (!hand) continue;
+    // 接続線(緑)
+    oCtx.strokeStyle = '#00ff66';
+    oCtx.lineWidth = 2;
+    oCtx.beginPath();
+    for (const [a, b] of HAND_CONNECTIONS) {
+      const pa = hand[a], pb = hand[b];
+      oCtx.moveTo((1 - pa.x) * W, pa.y * H);
+      oCtx.lineTo((1 - pb.x) * W, pb.y * H);
+    }
+    oCtx.stroke();
+    // ランドマーク点(赤)
+    oCtx.fillStyle = '#ff2244';
+    for (const lm of hand) {
+      const x = (1 - lm.x) * W, y = lm.y * H;
+      oCtx.beginPath();
+      oCtx.arc(x, y, 3.5, 0, Math.PI * 2);
+      oCtx.fill();
+    }
+  }
+}
+
+let lastTime = 0;
+async function loop() {
+  if (!running) return;
+  const now = performance.now();
+  const dt = now - lastTime;
+  lastTime = now;
+
+  if (video.readyState >= 2 && handLandmarker) {
+    const res = handLandmarker.detectForVideo(video, now);
+    leftHand = null;
+    rightHand = null;
+    let leftHandedness = null, rightHandedness = null;
+    if (res.landmarks && res.landmarks.length > 0) {
+      for (let i = 0; i < res.landmarks.length; i++) {
+        const lm = res.landmarks[i];
+        const hd = res.handedness?.[i]?.[0]?.categoryName;
+        // ミラー表示なので Left/Right 入れ替え(ユーザー視点)
+        if (hd === 'Left') { rightHand = lm; rightHandedness = hd; }
+        else if (hd === 'Right') { leftHand = lm; leftHandedness = hd; }
+        else if (!leftHand) { leftHand = lm; leftHandedness = hd; }
+        else { rightHand = lm; rightHandedness = hd; }
+      }
+    }
+
+    // 手のひら/甲判定とフリップ検出
+    if (flipCooldown > 0) flipCooldown -= dt;
+    let flipped = false;
+    if (leftHand && leftHandedness) {
+      const p = isPalmFacing(leftHand, leftHandedness);
+      if (p !== prevPalmL && flipCooldown <= 0) {
+        flipped = true;
+      }
+      prevPalmL = p;
+      palmL = p;
+    }
+    if (rightHand && rightHandedness) {
+      const p = isPalmFacing(rightHand, rightHandedness);
+      if (p !== prevPalmR && flipCooldown <= 0) {
+        flipped = true;
+      }
+      prevPalmR = p;
+      palmR = p;
+    }
+    if (flipped) {
+      currentSet = (currentSet + 1) % PALETTE_SETS.length;
+      // レイアウトも切替(滑らかな遷移のため prevLayout を保存)
+      prevLayout = currentLayout;
+      currentLayout = (currentLayout + 1) % LAYOUTS.length;
+      layoutTransition = 0; // 0→1 へ補間開始
+      flipCooldown = 400; // 0.4秒クールダウン
+      // フリップ時に少しパネルを一気に追加
+      for (let i = 0; i < 4; i++) {
+        const p = makePanel();
+        p.life = 1.0;
+        panels.push(p);
+        if (panels.length > MAX_PANELS) panels.shift();
+      }
+    }
+  }
+
+  update(dt, now);
+  drawPanels();
+  drawHandOverlay();
+
+  if (leftHand && rightHand) {
+    const lSym = palmL ? '✋' : '🤚';
+    const rSym = palmR ? '✋' : '🤚';
+    const sT = drawPanels._spreadT || 0;
+    let phaseLabel;
+    if (sT < 0.2) phaseLabel = '🌀 集合';
+    else if (sT < 0.8) phaseLabel = '✨ 展開中';
+    else phaseLabel = LAYOUT_NAMES[LAYOUTS[currentLayout]];
+    infoEl.textContent = `${lSym}${rSym} ${phaseLabel} [${PALETTE_SETS[currentSet].name}] パネル${panels.length}`;
+  } else if (leftHand || rightHand) {
+    infoEl.textContent = '片手検出中 - もう片方の手も';
+  } else {
+    infoEl.textContent = '手をかざしてください — クルッと返すとレイアウト切替';
+  }
+
+  requestAnimationFrame(loop);
+}
+
+snapBtn.addEventListener('click', () => {
+  // ステージ全体を1枚に合成して保存
+  const dpr = window.devicePixelRatio || 1;
+  const W = window.innerWidth * dpr;
+  const H = window.innerHeight * dpr;
+  const out = document.createElement('canvas');
+  out.width = W; out.height = H;
+  const ctx = out.getContext('2d');
+  // video をミラー描画
+  ctx.save();
+  ctx.translate(W, 0);
+  ctx.scale(-1, 1);
+  // video のアスペクト比に合わせて object-fit:cover 相当
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const scale = Math.max(W / vw, H / vh);
+  const dw = vw * scale, dh = vh * scale;
+  ctx.drawImage(video, (W - dw) / 2, (H - dh) / 2, dw, dh);
+  ctx.restore();
+  ctx.drawImage(panelsCanvas, 0, 0);
+  ctx.drawImage(overlayCanvas, 0, 0);
+  out.toBlob(blob => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `hand_glitch_${Date.now()}.png`;
+    a.click();
+  }, 'image/png');
+});
+
+clearBtn.addEventListener('click', () => {
+  panels.length = 0;
+  panelCache.clear();
+});
+
+modeBtn.addEventListener('click', () => {
+  mode = (mode + 1) % 3;
+  modeBtn.textContent = `モード: ${modeNames[mode]}`;
+});
+
+layoutBtn.addEventListener('click', () => {
+  prevLayout = currentLayout;
+  currentLayout = (currentLayout + 1) % LAYOUTS.length;
+  layoutTransition = 0;
+  layoutBtn.textContent = LAYOUT_NAMES[LAYOUTS[currentLayout]];
+});
+
+startBtn.addEventListener('click', async () => {
+  startBtn.textContent = '読み込み中...';
+  try {
+    await setupCamera();
+    await setupHandLandmarker();
+    startBtn.classList.add('hidden');
+    running = true;
+    lastTime = performance.now();
+    loop();
+  } catch (e) {
+    console.error(e);
+    showErr('カメラまたはモデルの初期化に失敗: ' + e.message);
+    startBtn.textContent = '🖐 タップして開始';
+  }
+});
+</script>
+</body>
+</html>
