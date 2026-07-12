@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#050403">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>TIME SCRATCH — 現実がレコード盤になる</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#050403;
+    touch-action:none;-webkit-user-select:none;user-select:none;
+    font-family:ui-monospace,"SF Mono",Menlo,monospace;color:#ffd9a0}
+  #cv{position:fixed;inset:0;width:100%;height:100%;display:block}
+  video{display:none}
+
+  #overlay{position:fixed;inset:0;z-index:10;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:14px;text-align:center;padding:24px;
+    background:radial-gradient(ellipse at 50% 40%,#140d05 0%,#050403 72%);
+    transition:opacity .9s ease}
+  #overlay.hide{opacity:0;pointer-events:none}
+  .rec{width:12px;height:12px;border-radius:50%;background:#ff3b30;
+    box-shadow:0 0 14px #ff3b30;animation:bl 1.2s steps(2) infinite}
+  @keyframes bl{50%{opacity:.15}}
+  .t{font-size:34px;font-weight:700;letter-spacing:.3em;margin-left:.3em;color:#ffe2b0;
+    text-shadow:0 0 26px rgba(255,180,84,.4)}
+  .s{font-size:12px;letter-spacing:.3em;color:#c9a26a;margin-left:.3em}
+  #status{font-size:11px;color:#8a734f;letter-spacing:.1em;min-height:16px}
+  #start{margin-top:12px;padding:14px 54px;font-size:14px;letter-spacing:.5em;text-indent:.5em;
+    color:#ffe2b0;background:transparent;border:1px solid rgba(255,180,84,.55);
+    border-radius:999px;transition:.3s;font-family:inherit}
+  #start:disabled{opacity:.3}
+  #start:not(:disabled):active{background:rgba(255,180,84,.18)}
+  .tip{font-size:11px;color:#8a734f;margin-top:8px;line-height:1.9}
+
+  #hud{position:fixed;top:calc(env(safe-area-inset-top) + 10px);right:12px;display:flex;gap:8px;z-index:9}
+  #hud button{width:38px;height:38px;border-radius:50%;border:1px solid rgba(255,180,84,.4);
+    background:rgba(20,12,4,.55);color:#ffd9a0;font-size:15px;font-family:inherit;
+    -webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+  #hud button.off{opacity:.35}
+
+  #guide{position:fixed;inset:0;z-index:8;display:flex;flex-direction:column;justify-content:center;
+    gap:16px;padding:40px 32px;background:rgba(5,4,3,.9);
+    -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);
+    opacity:0;pointer-events:none;transition:.35s}
+  #guide.on{opacity:1;pointer-events:auto}
+  .g{font-size:13px;line-height:1.75;color:#ecd3a8;
+    border-left:2px solid rgba(255,180,84,.6);padding-left:14px}
+  .g b{color:#fff}
+  .g.last{border-color:rgba(87,232,255,.7);color:#bfeeff}
+  .gx{font-size:10px;color:#8a734f;letter-spacing:.2em;text-align:center;margin-top:8px}
+
+  #hint{position:fixed;bottom:calc(env(safe-area-inset-bottom) + 96px);left:0;right:0;
+    text-align:center;font-size:11px;letter-spacing:.2em;color:#d9b070;
+    opacity:0;transition:opacity .7s;z-index:7;pointer-events:none}
+  #hint.on{opacity:.9}
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<video id="cam" playsinline muted autoplay></video>
+
+<div id="overlay">
+  <div class="rec"></div>
+  <div class="t">TIME SCRATCH</div>
+  <div class="s">現実がレコード盤になる。</div>
+  <div id="status">テープ機構を読み込み中…</div>
+  <button id="start" disabled>REC 開始</button>
+  <div class="tip">🎧 イヤホン強く推奨（ハウリング防止）<br>カメラと<b>マイク</b>を許可してください<br>常に直近20秒の自分が録音・録画され続けます</div>
+</div>
+
+<div id="hud">
+  <button id="bGuide" aria-label="操作ガイド">?</button>
+  <button id="bGhost" aria-label="現在レイヤー切替">◐</button>
+</div>
+
+<div id="guide">
+  <div class="g"><b>画面下のデッキに手を置く</b> — 左右に動かして時間をスクラッチ。止めるとその瞬間から等速再生</div>
+  <div class="g"><b>デッキ上で握りこぶし</b> — ブレーキ。テープストップで音が沈む</div>
+  <div class="g"><b>上の空間で素早く突く</b> — 過去の音の欠片（グレイン）が鳴る。突いた高さで音程が変わる</div>
+  <div class="g"><b>手を離す</b> — 現在に戻る</div>
+  <div class="g last">指で下のタイムラインを直接なぞってもスクラッチできます。音も映像も、擦っているのは20秒前までの自分自身です</div>
+  <div class="gx">タップで閉じる</div>
+</div>
+
+<div id="hint">下のデッキに手 ／ 指でタイムラインをなぞる</div>
+
+<script type="module">
+/* ============================================================
+   TIME SCRATCH — 過去の自分がビニール盤
+   ・映像: 20秒リングバッファ(12fps) / 音声: 20秒リングバッファ(生サンプル)
+   ・左右の手の役割は「位置」で決まる: 下=デッキ(時間) / 上=グレイン(打撃)
+   ・音は本物の可変速再生(AudioWorklet, 失敗時ScriptProcessorへ自動降格)
+   ============================================================ */
+
+// ---------- 定数 ----------
+const FPS=12, BUF_S=20, NF=FPS*BUF_S;      // 映像リング: 240フレーム
+const TW=16, TH=12;                        // 解析用タイニーフレーム
+
+// ---------- DOM ----------
+const cv=document.getElementById('cv');
+const ctx=cv.getContext('2d',{alpha:false});
+const video=document.getElementById('cam');
+const overlay=document.getElementById('overlay');
+const statusEl=document.getElementById('status');
+const startBtn=document.getElementById('start');
+const guideEl=document.getElementById('guide');
+const hintEl=document.getElementById('hint');
+
+// ---------- canvas ----------
+let W=0,H=0,DPR=1,deckTop=0,insetB=0;
+function resize(){
+  DPR=Math.min(devicePixelRatio||1,2);
+  W=innerWidth;H=innerHeight;
+  cv.width=W*DPR;cv.height=H*DPR;
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  ctx.fillStyle='#050403';ctx.fillRect(0,0,W,H);
+  deckTop=H*0.62;
+  insetB=parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--sab'))||0;
+}
+document.documentElement.style.setProperty('--sab','env(safe-area-inset-bottom)');
+addEventListener('resize',resize);resize();
+
+// ---------- utils ----------
+const clamp=(v,a,b)=>v<a?a:v>b?b:v;
+const lerp=(a,b,t)=>a+(b-a)*t;
+const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+const nz=x=>{const s=Math.sin(x)*43758.5453;return s-Math.floor(s);};
+const pad=n=>String(n).padStart(2,'0');
+
+// ---------- 映像リングバッファ ----------
+let FW=240,FH=180;
+let frames=null, metaL=null, metaM=null, metaT=null, tprev=null;
+let wIdx=0;
+const tiny=document.createElement('canvas'); tiny.width=TW; tiny.height=TH;
+const tctx=tiny.getContext('2d',{willReadFrequently:true});
+function allocRing(){
+  FH=180; FW=Math.max(120,Math.round(FH*(video.videoWidth||640)/(video.videoHeight||480)));
+  frames=[];
+  for(let i=0;i<NF;i++){
+    const c=document.createElement('canvas');c.width=FW;c.height=FH;
+    const cc=c.getContext('2d');cc.fillStyle='#000';cc.fillRect(0,0,FW,FH);
+    frames.push({cv:c,ctx:cc});
+  }
+  metaL=new Float32Array(NF);metaM=new Float32Array(NF);metaT=new Float64Array(NF);
+  tprev=new Float32Array(TW*TH);
+}
+function captureTick(){
+  if(!frames||video.readyState<2)return;
+  const slot=wIdx%NF, f=frames[slot];
+  f.ctx.save();f.ctx.translate(FW,0);f.ctx.scale(-1,1);
+  f.ctx.drawImage(video,0,0,FW,FH);f.ctx.restore();
+  tctx.drawImage(f.cv,0,0,TW,TH);
+  try{
+    const d=tctx.getImageData(0,0,TW,TH).data;
+    let lum=0,mot=0;
+    for(let i=0,j=0;i<d.length;i+=4,j++){
+      const l=(d[i]*2+d[i+1]*3+d[i+2])/6;
+      lum+=l;mot+=Math.abs(l-tprev[j]);tprev[j]=l;
+    }
+    metaL[slot]=lum/(TW*TH)/255;
+    metaM[slot]=Math.min(1,mot/(TW*TH)/38);
+  }catch(e){}
+  metaT[slot]=Date.now();
+  wIdx++;
+}
+const clampAbs=a=>Math.max(Math.max(0,wIdx-NF),Math.min(wIdx-1,a));
+const slotOf=a=>((Math.round(a)%NF)+NF)%NF;
+
+// ---------- 音声エンジン(テープ) ----------
+const WORKLET=`
+class Tape extends AudioWorkletProcessor{
+ constructor(){super();
+  this.N=Math.floor(sampleRate*${BUF_S});
+  this.b=new Float32Array(this.N);
+  this.w=0;this.p=0;this.g=0;this.dc1=0;this.dc2=0;
+  this.active=false;this.age=3;this.brake=false;this.frz=0;
+  this.gr=[];
+  this.port.onmessage=e=>{const m=e.data;
+   if(m.t==='s'){
+    if(m.b&&!this.brake)this.frz=this.w-this.age*sampleRate;
+    this.active=m.a;this.age=m.g;this.brake=m.b;
+   }else if(m.t==='g'&&this.gr.length<8){
+    this.gr.push({p:this.w-m.age*sampleRate,r:m.r,n:0,d:Math.floor(m.d*sampleRate),a:m.a});
+   }};
+ }
+ rd(p){const N=this.N;let i=p%N;if(i<0)i+=N;
+  const i0=i|0;let i1=i0+1;if(i1>=N)i1=0;const f=i-i0;
+  return this.b[i0]*(1-f)+this.b[i1]*f;}
+ process(inp,out){
+  const x=inp[0]&&inp[0][0];const L=out[0][0],R=out[0][1]||L;const n=L.length;
+  for(let k=0;k<n;k++){
+   this.b[this.w%this.N]=x?x[k]:0;this.w++;
+   const tgt=this.brake?this.frz:(this.w-this.age*sampleRate);
+   const c=this.brake?0.00004:0.00028;
+   this.p+=(tgt-this.p)*c;
+   if(this.w-this.p>this.N-64)this.p=this.w-this.N+64;
+   if(this.p>this.w-2)this.p=this.w-2;
+   let s=this.rd(this.p);
+   if(this.g>0.01&&Math.random()<0.0006)s+=(Math.random()-0.5)*0.5;
+   this.g+=((this.active?0.9:0)-this.g)*0.0015;
+   s*=this.g;
+   for(let q=this.gr.length-1;q>=0;q--){const G=this.gr[q];
+    const env=G.n<192?G.n/192:Math.pow(Math.max(0,1-(G.n-192)/G.d),2);
+    s+=this.rd(G.p)*env*G.a;
+    G.p+=G.r;G.n++;
+    if(G.n>=192+G.d)this.gr.splice(q,1);
+   }
+   const y=s-this.dc1+0.995*this.dc2;this.dc1=s;this.dc2=y;
+   const o=Math.tanh(y*1.2)*0.9;
+   L[k]=o;R[k]=o;
+  }
+  return true;
+ }}
+registerProcessor('tape',Tape);`;
+
+let AC=null,sendA=()=>{},usedSP=false;
+function makeSPEngine(){ // AudioWorklet不可時のフォールバック
+  const sr=AC.sampleRate,N=Math.floor(sr*BUF_S),b=new Float32Array(N);
+  let w=0,p=0,g=0,dc1=0,dc2=0;const gr=[];
+  const st={active:false,age:3,brake:false,frz:0};
+  const node=AC.createScriptProcessor(1024,1,2);
+  node.onaudioprocess=ev=>{
+    const x=ev.inputBuffer.getChannelData(0);
+    const L=ev.outputBuffer.getChannelData(0),R=ev.outputBuffer.getChannelData(1);
+    for(let k=0;k<x.length;k++){
+      b[w%N]=x[k];w++;
+      const tgt=st.brake?st.frz:(w-st.age*sr);
+      const c=st.brake?0.00004:0.00028;
+      p+=(tgt-p)*c;
+      if(w-p>N-64)p=w-N+64;
+      if(p>w-2)p=w-2;
+      let i=p%N;if(i<0)i+=N;const i0=i|0;let i1=i0+1;if(i1>=N)i1=0;const f=i-i0;
+      let s=(b[i0]*(1-f)+b[i1]*f);
+      if(g>0.01&&Math.random()<0.0006)s+=(Math.random()-0.5)*0.5;
+      g+=((st.active?0.9:0)-g)*0.0015;s*=g;
+      for(let q=gr.length-1;q>=0;q--){const G=gr[q];
+        const env=G.n<192?G.n/192:Math.pow(Math.max(0,1-(G.n-192)/G.d),2);
+        let gi=G.p%N;if(gi<0)gi+=N;const g0=gi|0;let g1=g0+1;if(g1>=N)g1=0;const gf=gi-g0;
+        s+=(b[g0]*(1-gf)+b[g1]*gf)*env*G.a;
+        G.p+=G.r;G.n++;
+        if(G.n>=192+G.d)gr.splice(q,1);
+      }
+      const y=s-dc1+0.995*dc2;dc1=s;dc2=y;
+      const o=Math.tanh(y*1.2)*0.9;
+      L[k]=o;R[k]=o;
+    }
+  };
+  return {node,msg(m){
+    if(m.t==='s'){if(m.b&&!st.brake)st.frz=w-st.age*sr;st.active=m.a;st.age=m.g;st.brake=m.b;}
+    else if(m.t==='g'&&gr.length<8)gr.push({p:w-m.age*sr,r:m.r,n:0,d:Math.floor(m.d*sr),a:m.a});
+  }};
+}
+async function initAudio(stream){
+  AC=new (window.AudioContext||window.webkitAudioContext)();
+  await AC.resume();
+  const comp=AC.createDynamicsCompressor();
+  comp.threshold.value=-12;comp.ratio.value=6;comp.knee.value=14;
+  comp.connect(AC.destination);
+  const master=AC.createGain();master.gain.value=0.95;master.connect(comp);
+  let node=null;
+  try{
+    const url=URL.createObjectURL(new Blob([WORKLET],{type:'application/javascript'}));
+    await AC.audioWorklet.addModule(url);
+    node=new AudioWorkletNode(AC,'tape',{numberOfInputs:1,numberOfOutputs:1,outputChannelCount:[2]});
+    sendA=m=>node.port.postMessage(m);
+  }catch(e){
+    const eng=makeSPEngine();node=eng.node;sendA=eng.msg;usedSP=true;
+  }
+  node.connect(master);
+  AC.createMediaStreamSource(stream).connect(node);
+}
+
+// ---------- カメラcover変換 ----------
+let cover={s:1,ox:0,oy:0,vw:640,vh:480};
+function updateCover(){
+  const vw=video.videoWidth||640,vh=video.videoHeight||480;
+  const s=Math.max(W/vw,H/vh);
+  cover={s,ox:(W-vw*s)/2,oy:(H-vh*s)/2,vw,vh};
+}
+const toScreen=lm=>({x:(cover.vw-lm.x*cover.vw)*cover.s+cover.ox, y:lm.y*cover.vh*cover.s+cover.oy});
+function screenToFrame(x,y){ // 画面座標→保存フレーム座標
+  const s=Math.max(W/FW,H/FH),dx=(W-FW*s)/2,dy=(H-FH*s)/2;
+  return {x:(x-dx)/s,y:(y-dy)/s,s};
+}
+
+// ---------- 状態 ----------
+const scrub={active:false,age:3,lastAge:3,brake:false,x:0,mix:0,vel:0};
+let frozenAbs=0,frozenSet=false,shownAbs=0,prevAge=3;
+let touch={active:false,x:0};
+let lastHandTime=0,lastJab=0,everScrubbed=false;
+let ghostOn=true,perfLow=false;
+const gTrack=[]; // グレイン手の追跡
+const shards=[]; // 引き裂かれた過去の破片
+
+// ---------- 手の解釈 ----------
+function handleHands(res,now,dtS){
+  let deckHand=null;const others=[];
+  if(res&&res.landmarks){
+    if(res.landmarks.length)lastHandTime=now;
+    for(const lm of res.landmarks){
+      const pts=lm.map(toScreen);
+      let px=0,py=0;for(const i of [0,5,9,13,17]){px+=pts[i].x;py+=pts[i].y;}
+      const palm={x:px/5,y:py/5};
+      const span=dist(pts[5],pts[17])+1e-4;
+      let tipAvg=0;for(const i of [8,12,16,20])tipAvg+=dist(pts[i],palm);tipAvg/=4;
+      const fist=tipAvg/span<1.15;
+      const h={palm,fist,tip:pts[8],pts};
+      if(palm.y>deckTop){ if(!deckHand||palm.y>deckHand.palm.y)deckHand=h; }
+      else others.push(h);
+    }
+  }
+  // スクラブ判定(タッチ優先)
+  if(touch.active){scrub.active=true;scrub.x=touch.x;scrub.brake=false;}
+  else if(deckHand){scrub.active=true;scrub.x=deckHand.palm.x;scrub.brake=deckHand.fist;}
+  else{scrub.active=false;scrub.brake=false;}
+  if(scrub.active)everScrubbed=true;
+
+  const maxAge=Math.max(0.3,Math.min(BUF_S-0.3,(wIdx-2)/FPS));
+  if(scrub.active&&!scrub.brake)
+    scrub.age=clamp((1-scrub.x/W)*BUF_S,0.15,maxAge);
+
+  // 表示フレーム(音声側と同じ物理: 停止=等速前進 / ブレーキ=絶対凍結)
+  if(scrub.active){
+    if(scrub.brake){
+      if(!frozenSet){frozenAbs=wIdx-1-scrub.age*FPS;frozenSet=true;}
+      shownAbs=frozenAbs;
+    }else{frozenSet=false;shownAbs=wIdx-1-scrub.age*FPS;scrub.lastAge=scrub.age;}
+  }else{frozenSet=false;shownAbs=wIdx-1-scrub.lastAge*FPS;}
+  shownAbs=clampAbs(shownAbs);
+  scrub.mix=lerp(scrub.mix,scrub.active?1:0,0.12);
+
+  // 視覚用の再生速度推定
+  let vt=0;
+  if(scrub.active&&!scrub.brake)vt=1-(scrub.age-prevAge)/Math.max(dtS,0.001);
+  scrub.vel=lerp(scrub.vel,vt,0.13);
+  prevAge=scrub.age;
+
+  // グレイン(上空間の突き)
+  for(const h of others){
+    let tr=null,bd=1e9;
+    for(const t of gTrack){const d=dist(t,h.tip);if(d<bd&&d<160){bd=d;tr=t;}}
+    if(!tr){tr={x:h.tip.x,y:h.tip.y,t:now};gTrack.push(tr);if(gTrack.length>3)gTrack.shift();}
+    const dt=Math.max(1,now-tr.t);
+    const spd=dist(tr,h.tip)/dt; // px/ms
+    if(spd>1.3&&now-lastJab>130){
+      lastJab=now;
+      const yN=clamp(1-(h.tip.y)/(deckTop),0,1);
+      const SEMIS=[-12,-9,-7,-5,-2,0,3,5,7,10,12];
+      const r=Math.pow(2,SEMIS[Math.round(yN*(SEMIS.length-1))]/12);
+      const age=(wIdx-1-shownAbs)/FPS;
+      sendA({t:'g',age:Math.max(0.15,age),r,a:clamp(0.3+spd*0.12,0.3,0.75),d:0.16+Math.min(0.12,spd*0.03)});
+      spawnShard(h.tip);
+    }
+    tr.x=h.tip.x;tr.y=h.tip.y;tr.t=now;
+  }
+  // 音声側へ
+  sendA({t:'s',a:scrub.active,g:scrub.age,b:scrub.brake});
+  return {deckHand,others};
+}
+
+// ---------- 破片(過去を引き剥がす) ----------
+function spawnShard(pt){
+  const fc=frames[slotOf(shownAbs)].cv;
+  const f=screenToFrame(pt.x,pt.y);
+  const sw=34+Math.random()*26,sh=sw*0.75;
+  shards.push({img:fc,sx:clamp(f.x-sw/2,0,FW-sw),sy:clamp(f.y-sh/2,0,FH-sh),sw,sh,
+    x:pt.x,y:pt.y,vx:(Math.random()-0.5)*260,vy:-140-Math.random()*160,
+    rot:0,vr:(Math.random()-0.5)*6,life:1,scale:f.s});
+}
+
+// ---------- 描画 ----------
+function drawCoverStrips(img,iw,ih,alpha,shear,now){
+  const s=Math.max(W/iw,H/ih),dw=iw*s,dh=ih*s,dx=(W-dw)/2,dy=(H-dh)/2;
+  ctx.globalAlpha=alpha;
+  if(shear<0.6){ctx.drawImage(img,dx,dy,dw,dh);}
+  else{
+    const n=perfLow?8:14,hstep=H/n;
+    for(let k=0;k<n;k++){
+      const off=(nz(k*7.13+((now*0.009)|0))*2-1)*shear;
+      const syS=(k*hstep-dy)/s,shS=hstep/s;
+      ctx.drawImage(img,0,syS,iw,shS,dx+off,k*hstep,dw,hstep);
+    }
+  }
+  ctx.globalAlpha=1;
+}
+function drawLiveCover(alpha){
+  ctx.save();ctx.globalAlpha=alpha;
+  ctx.translate(W,0);ctx.scale(-1,1);
+  ctx.drawImage(video,cover.ox,cover.oy,cover.vw*cover.s,cover.vh*cover.s);
+  ctx.restore();ctx.globalAlpha=1;
+}
+let scanPat=null;
+function scanlines(){
+  if(!scanPat){
+    const p=document.createElement('canvas');p.width=4;p.height=3;
+    const pc=p.getContext('2d');pc.fillStyle='rgba(0,0,0,0.22)';pc.fillRect(0,2,4,1);
+    scanPat=ctx.createPattern(p,'repeat');
+  }
+  ctx.fillStyle=scanPat;ctx.fillRect(0,0,W,H);
+}
+function corner(x,y,sx,sy){
+  ctx.beginPath();ctx.moveTo(x+18*sx,y);ctx.lineTo(x,y);ctx.lineTo(x,y+18*sy);ctx.stroke();
+}
+function fmtT(ms){const d=new Date(ms);return pad(d.getHours())+':'+pad(d.getMinutes())+':'+pad(d.getSeconds());}
+
+function render(now,hands){
+  const m=scrub.mix;
+  ctx.globalCompositeOperation='source-over';
+  ctx.fillStyle='#050403';ctx.fillRect(0,0,W,H);
+
+  // --- 過去レイヤー ---
+  if(frames&&m>0.02&&wIdx>2){
+    const shear=clamp(Math.abs(scrub.vel-1)*10,0,38)*m+(scrub.brake?6:0);
+    const i0=Math.floor(shownAbs),fr=shownAbs-i0;
+    drawCoverStrips(frames[slotOf(clampAbs(i0))].cv,FW,FH,m,shear,now);
+    if(fr>0.15)drawCoverStrips(frames[slotOf(clampAbs(i0+1))].cv,FW,FH,m*fr*0.85,shear,now);
+    // 収差ゴースト
+    if(!perfLow&&shear>2){
+      ctx.globalCompositeOperation='lighter';
+      ctx.globalAlpha=0.22*m;
+      const s=Math.max(W/FW,H/FH);
+      ctx.drawImage(frames[slotOf(clampAbs(i0))].cv,(W-FW*s)/2+clamp(scrub.vel*3,-18,18),(H-FH*s)/2,FW*s,FH*s);
+      ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';
+    }
+    // セピア(過去は暖色)
+    ctx.globalCompositeOperation='multiply';
+    ctx.fillStyle=`rgba(255,214,160,${0.3*m})`;ctx.fillRect(0,0,W,H);
+    ctx.globalCompositeOperation='source-over';
+    // ノイズ帯
+    const bands=Math.floor(clamp(Math.abs(scrub.vel-1),0,4));
+    for(let b=0;b<bands;b++){
+      const y=nz(b*3.7+now*0.01)*H,bh=6+nz(b+now*0.02)*20;
+      ctx.fillStyle=`rgba(255,240,220,${0.08+0.1*Math.random()})`;
+      ctx.fillRect(0,y,W,bh);
+    }
+  }
+  // --- 現在レイヤー(青白い幽霊) ---
+  if(video.readyState>=2){
+    ctx.globalCompositeOperation='lighter';
+    drawLiveCover(ghostOn?(1-0.84*m):(1-m));
+    ctx.globalCompositeOperation='source-over';
+  }
+  scanlines();
+
+  // --- 破片 ---
+  const dtS=1/60;
+  ctx.globalCompositeOperation='lighter';
+  for(let i=shards.length-1;i>=0;i--){const s=shards[i];
+    s.x+=s.vx*dtS;s.y+=s.vy*dtS;s.vy+=520*dtS;s.rot+=s.vr*dtS;s.life-=dtS*1.5;
+    if(s.life<=0){shards.splice(i,1);continue;}
+    ctx.save();ctx.translate(s.x,s.y);ctx.rotate(s.rot);ctx.globalAlpha=s.life*0.9;
+    const dw=s.sw*s.scale,dh=s.sh*s.scale;
+    ctx.drawImage(s.img,s.sx,s.sy,s.sw,s.sh,-dw/2,-dh/2,dw,dh);
+    ctx.strokeStyle='rgba(87,232,255,0.6)';ctx.lineWidth=1;ctx.strokeRect(-dw/2,-dh/2,dw,dh);
+    ctx.restore();
+  }
+  ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';
+
+  // --- デッキゾーン ---
+  ctx.strokeStyle='rgba(255,180,84,0.18)';ctx.setLineDash([6,10]);
+  ctx.beginPath();ctx.moveTo(0,deckTop);ctx.lineTo(W,deckTop);ctx.stroke();ctx.setLineDash([]);
+  ctx.fillStyle='rgba(255,180,84,0.4)';ctx.font='9px ui-monospace,Menlo,monospace';
+  ctx.fillText('DECK',8,deckTop+13);
+
+  // --- タイムライン ---
+  const TL=54,tlY=H-TL-10;
+  ctx.fillStyle='rgba(0,0,0,0.55)';ctx.fillRect(0,tlY,W,TL);
+  ctx.fillStyle='rgba(255,180,84,0.25)';ctx.fillRect(0,tlY,W,1);
+  if(frames){
+    const absStart=Math.max(0,wIdx-NF),xw=Math.max(1,W/NF-0.4);
+    for(let abs=absStart;abs<wIdx;abs++){
+      const slot=abs%NF,x=W-(wIdx-abs)/NF*W;
+      const l=metaL[slot],mo=metaM[slot];
+      const ch=6+l*16+mo*24;
+      ctx.fillStyle=`rgba(255,${170+Math.floor(l*60)},84,${0.2+mo*0.55})`;
+      ctx.fillRect(x,tlY+TL-5-ch,xw,ch);
+    }
+    // 再生ヘッド
+    const ageVis=(wIdx-1-shownAbs)/FPS;
+    const px=W-(ageVis/BUF_S)*W;
+    if(m>0.02||!everScrubbed){
+      ctx.fillStyle=scrub.brake?'#ff3b30':'#57e8ff';
+      ctx.fillRect(px-1,tlY-8,2,TL+8);
+      ctx.beginPath();ctx.moveTo(px-6,tlY-8);ctx.lineTo(px+6,tlY-8);ctx.lineTo(px,tlY-1);ctx.closePath();ctx.fill();
+      ctx.font='11px ui-monospace,Menlo,monospace';
+      ctx.fillText((scrub.brake?'STOP ':'')+'-'+ageVis.toFixed(1)+'s',clamp(px+8,4,W-70),tlY-12);
+    }
+  }
+  // REC
+  if((now/1000)%1<0.6){ctx.fillStyle='#ff3b30';ctx.beginPath();ctx.arc(W-14,tlY-14,4,0,7);ctx.fill();}
+  ctx.fillStyle='rgba(255,120,110,0.9)';ctx.font='10px ui-monospace,Menlo,monospace';
+  ctx.fillText('REC',W-44,tlY-10);
+
+  // --- 手 ---
+  if(hands){
+    if(hands.deckHand){
+      const hx=hands.deckHand.palm.x;
+      ctx.strokeStyle='rgba(87,232,255,0.3)';ctx.lineWidth=1;
+      ctx.beginPath();ctx.moveTo(hx,deckTop);ctx.lineTo(hx,tlY);ctx.stroke();
+      ctx.strokeStyle=scrub.brake?'rgba(255,59,48,0.8)':'rgba(87,232,255,0.7)';
+      ctx.lineWidth=2;ctx.beginPath();ctx.arc(hx,hands.deckHand.palm.y,scrub.brake?14:20,0,7);ctx.stroke();
+    }
+    for(const h of hands.others){
+      ctx.strokeStyle='rgba(87,232,255,0.7)';ctx.lineWidth=1.5;
+      ctx.beginPath();ctx.moveTo(h.tip.x-9,h.tip.y);ctx.lineTo(h.tip.x+9,h.tip.y);
+      ctx.moveTo(h.tip.x,h.tip.y-9);ctx.lineTo(h.tip.x,h.tip.y+9);ctx.stroke();
+    }
+  }
+
+  // --- OSD ---
+  ctx.strokeStyle='rgba(255,180,84,0.3)';ctx.lineWidth=1;
+  const it=Math.max(12,insetB?12:12)+ (parseFloat('0')||0);
+  corner(10,44,1,1);corner(W-10,44,-1,1);corner(10,tlY-26,1,-1);corner(W-10,tlY-26,-1,-1);
+  ctx.fillStyle='rgba(255,217,160,0.85)';ctx.font='10px ui-monospace,Menlo,monospace';
+  ctx.fillText('⦿ TIME SCRATCH',14,58);
+  const elapsed=Math.min(BUF_S,Math.floor(wIdx/FPS));
+  let osd='TAPE '+elapsed+'s/'+BUF_S+'s'+(usedSP?' ·compat':'');
+  if(m>0.4&&frames){
+    const wt=metaT[slotOf(shownAbs)];
+    if(wt)osd='⟲ '+fmtT(wt)+'  '+osd;
+  }
+  ctx.textAlign='right';ctx.fillText(osd,W-14,58);ctx.textAlign='left';
+}
+
+// ---------- MediaPipe ----------
+let landmarker=null,started=false;
+let lastVT=-1,frameI=0,dtAvg=16,lastT=performance.now(),lastNow=0;
+function loop(now){
+  requestAnimationFrame(loop);
+  const dt=now-lastT;lastT=now;
+  dtAvg=dtAvg*0.94+dt*0.06;perfLow=dtAvg>38;
+  const detectEvery=dtAvg>44?2:1;
+  frameI++;
+  let res=null;
+  if(video.readyState>=2&&landmarker&&frameI%detectEvery===0&&video.currentTime!==lastVT){
+    lastVT=video.currentTime;updateCover();
+    try{res=landmarker.detectForVideo(video,now);}catch(e){}
+  }
+  const hands=handleHands(res,now,(now-lastNow)/1000||0.016);
+  lastNow=now;
+  render(now,hands);
+  hintEl.classList.toggle('on',started&&!everScrubbed&&now-lastHandTime<1e12&&performance.now()>bootT+5000);
+}
+let bootT=performance.now();
+
+// ---------- boot ----------
+(async()=>{
+  try{
+    const {HandLandmarker,FilesetResolver}=await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm');
+    const files=await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
+    landmarker=await HandLandmarker.createFromOptions(files,{
+      baseOptions:{
+        modelAssetPath:'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+        delegate:'GPU'},
+      runningMode:'VIDEO',numHands:2,
+      minHandDetectionConfidence:0.4,minHandPresenceConfidence:0.4,minTrackingConfidence:0.4});
+    statusEl.textContent='準備完了';startBtn.disabled=false;
+  }catch(e){
+    statusEl.textContent='読み込みに失敗しました。通信環境を確認して再読み込みしてください。';
+  }
+})();
+
+startBtn.addEventListener('click',async()=>{
+  if(started)return;
+  try{
+    const stream=await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:'user',width:{ideal:640},height:{ideal:480}},
+      audio:{echoCancellation:true,noiseSuppression:false,autoGainControl:true}
+    });
+    video.srcObject=stream;
+    await video.play();
+    await initAudio(stream);
+    allocRing();
+    setInterval(captureTick,1000/FPS);
+    started=true;bootT=performance.now();
+    overlay.classList.add('hide');
+    requestAnimationFrame(loop);
+  }catch(e){
+    statusEl.textContent='カメラ/マイクを利用できません。設定 → Safari から許可してください。';
+  }
+});
+
+// ---------- タッチスクラッチ ----------
+cv.addEventListener('pointerdown',e=>{
+  if(!started)return;
+  if(e.clientY>deckTop){touch.active=true;touch.x=e.clientX;}
+});
+cv.addEventListener('pointermove',e=>{if(touch.active)touch.x=e.clientX;});
+addEventListener('pointerup',()=>{touch.active=false;});
+addEventListener('pointercancel',()=>{touch.active=false;});
+
+// ---------- UI ----------
+document.getElementById('bGuide').addEventListener('click',()=>guideEl.classList.add('on'));
+guideEl.addEventListener('click',()=>guideEl.classList.remove('on'));
+document.getElementById('bGhost').addEventListener('click',e=>{
+  ghostOn=!ghostOn;e.currentTarget.classList.toggle('off',!ghostOn);
+});
+
+// ---------- iOS対策 ----------
+document.addEventListener('touchmove',e=>e.preventDefault(),{passive:false});
+document.addEventListener('gesturestart',e=>e.preventDefault());
+document.addEventListener('visibilitychange',()=>{
+  if(!AC)return;
+  document.hidden?AC.suspend():AC.resume();
+});
+</script>
+</body>
+</html>
