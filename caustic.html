@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#030810">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>CAUSTIC — 手はレンズ、音は光</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#030810;
+    touch-action:none;-webkit-user-select:none;user-select:none;
+    font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue","Hiragino Sans",sans-serif;color:#cfe6ff}
+  #cv{position:fixed;inset:0;width:100%;height:100%;display:block}
+  video{display:none}
+
+  #overlay{position:fixed;inset:0;z-index:10;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:14px;text-align:center;padding:24px;
+    background:radial-gradient(ellipse at 50% 38%,#081527 0%,#030810 72%);
+    transition:opacity .9s ease}
+  #overlay.hide{opacity:0;pointer-events:none}
+  .t{font-size:44px;font-weight:100;letter-spacing:.42em;margin-left:.42em;color:#e8f4ff;
+    text-shadow:0 0 34px rgba(120,200,255,.45)}
+  .s{font-size:13px;letter-spacing:.32em;color:#9fc4e8;margin-left:.32em}
+  #status{font-size:11px;color:#6e8fb0;letter-spacing:.12em;min-height:16px}
+  #start{margin-top:12px;padding:14px 56px;font-size:15px;letter-spacing:.5em;text-indent:.5em;
+    color:#dff1ff;background:transparent;border:1px solid rgba(140,200,255,.5);
+    border-radius:999px;transition:.3s}
+  #start:disabled{opacity:.3}
+  #start:not(:disabled):active{background:rgba(140,200,255,.18)}
+  .tip{font-size:11px;color:#5d7a99;margin-top:8px;line-height:1.8}
+
+  #wm{position:fixed;top:calc(env(safe-area-inset-top) + 16px);left:16px;z-index:9;
+    font-size:10px;letter-spacing:.4em;color:rgba(160,205,240,.5);pointer-events:none}
+  #hud{position:fixed;top:calc(env(safe-area-inset-top) + 10px);right:12px;display:flex;gap:8px;z-index:9}
+  #hud button{width:38px;height:38px;border-radius:50%;border:1px solid rgba(140,200,255,.35);
+    background:rgba(5,15,30,.5);color:#bcd9f2;font-size:15px;
+    -webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+  #hud button.off{opacity:.35}
+
+  #guide{position:fixed;inset:0;z-index:8;display:flex;flex-direction:column;justify-content:center;
+    gap:18px;padding:40px 34px;background:rgba(3,8,16,.88);
+    -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);
+    opacity:0;pointer-events:none;transition:.35s}
+  #guide.on{opacity:1;pointer-events:auto}
+  .g{font-size:14px;line-height:1.75;color:#c9e2f7;
+    border-left:2px solid rgba(255,214,140,.6);padding-left:14px}
+  .g b{color:#fff;font-weight:600}
+  .g.last{border-color:rgba(140,200,255,.7);color:#ffe9c0}
+  .gx{font-size:10px;color:#5d7a99;letter-spacing:.2em;text-align:center;margin-top:10px}
+
+  #hint{position:fixed;bottom:calc(env(safe-area-inset-bottom) + 26px);left:0;right:0;
+    text-align:center;font-size:12px;letter-spacing:.28em;color:#8fb4d8;
+    opacity:0;transition:opacity .7s;z-index:7;pointer-events:none}
+  #hint.on{opacity:.85}
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<video id="cam" playsinline muted autoplay></video>
+
+<div id="overlay">
+  <div class="t">CAUSTIC</div>
+  <div class="s">手はレンズ、音は光。</div>
+  <div id="status">光学系を読み込み中…</div>
+  <button id="start" disabled>起動</button>
+  <div class="tip">🎧 イヤホン推奨<br>カメラの使用を許可してください</div>
+</div>
+
+<div id="wm">CAUSTIC</div>
+<div id="hud">
+  <button id="bGuide" aria-label="操作ガイド">?</button>
+  <button id="bGhost" aria-label="カメラ表示切替">◐</button>
+</div>
+
+<div id="guide">
+  <div class="g"><b>開いた手</b> — レンズになる。光線が屈折する</div>
+  <div class="g"><b>ピンチを狭く</b> — 屈折率が上がり、焦点が鋭くなる</div>
+  <div class="g"><b>指を大きく開く</b> — 分光。光が虹に割れ、音がにじむ</div>
+  <div class="g"><b>握りこぶし</b> — ブラックホール。光と音を飲み込む</div>
+  <div class="g last">光が一点に集まった場所で、音が生まれる</div>
+  <div class="gx">タップで閉じる</div>
+</div>
+
+<div id="hint">手をかざしてください</div>
+
+<script type="module">
+/* ============================================================
+   CAUSTIC — 手がレンズになる光学楽器
+   ・光線はスネルの法則で本物の球面レンズ屈折(全反射も再現)
+   ・収束点(コースティクス)の密度がそのまま加算合成の音になる
+   ・iPhone Safari / MediaPipe HandLandmarker / 単一HTML
+   ============================================================ */
+
+// ---------- DOM ----------
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d', { alpha:false });
+const video = document.getElementById('cam');
+const overlay = document.getElementById('overlay');
+const statusEl = document.getElementById('status');
+const startBtn = document.getElementById('start');
+const guideEl = document.getElementById('guide');
+const hintEl = document.getElementById('hint');
+
+// ---------- canvas ----------
+let W=0,H=0,DPR=1;
+function resize(){
+  DPR = Math.min(devicePixelRatio||1, 2);
+  W = innerWidth; H = innerHeight;
+  cv.width = W*DPR; cv.height = H*DPR;
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  ctx.fillStyle = '#030810'; ctx.fillRect(0,0,W,H);
+  buildGrid();
+}
+addEventListener('resize', resize);
+
+// ---------- vec ----------
+const V=(x,y)=>({x,y});
+const sub=(a,b)=>V(a.x-b.x,a.y-b.y), add=(a,b)=>V(a.x+b.x,a.y+b.y), mul=(a,s)=>V(a.x*s,a.y*s);
+const dot=(a,b)=>a.x*b.x+a.y*b.y;
+const norm=a=>{const l=Math.hypot(a.x,a.y)||1;return V(a.x/l,a.y/l)};
+const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+const lerp=(a,b,t)=>a+(b-a)*t;
+const clamp=(v,a,b)=>v<a?a:v>b?b:v;
+
+// ---------- lens state (2 hands) ----------
+function mkLens(){return{c:V(0,0),r:0,n:1.6,disp:0,fist:false,p:0,tips:[],skel:null,_hit:false};}
+const lens=[mkLens(),mkLens()];
+let activeL=[];
+
+// ---------- camera cover mapping (mirror) ----------
+let cover={s:1,ox:0,oy:0,vw:640,vh:480};
+function updateCover(){
+  const vw=video.videoWidth||640, vh=video.videoHeight||480;
+  const s=Math.max(W/vw,H/vh);
+  cover={s,ox:(W-vw*s)/2,oy:(H-vh*s)/2,vw,vh};
+}
+function toScreen(lm){
+  return V((cover.vw-lm.x*cover.vw)*cover.s+cover.ox, lm.y*cover.vh*cover.s+cover.oy);
+}
+function avgPts(pts,idx){let x=0,y=0;for(const i of idx){x+=pts[i].x;y+=pts[i].y;}return V(x/idx.length,y/idx.length);}
+
+// ---------- hand → lens ----------
+let lastHandTime=0;
+function updateHands(res){
+  const found=[];
+  if(res&&res.landmarks){
+    for(const lm of res.landmarks){
+      const pts=lm.map(toScreen);
+      const C=avgPts(pts,[0,5,9,13,17]);
+      const span=dist(pts[5],pts[17])+1e-4;
+      let tipAvg=0; for(const i of [8,12,16,20]) tipAvg+=dist(pts[i],C); tipAvg/=4;
+      const open=tipAvg/span;
+      const fist=open<1.15;
+      const r=fist? span*0.85 : Math.max(tipAvg*1.15, span*1.25);
+      const pinch=dist(pts[4],pts[8])/span;                 // 親指-人差し指
+      const n=clamp(2.45-pinch*1.15, 1.14, 2.45);            // 屈折率
+      const spread=dist(pts[8],pts[20])/span;                // 指の開き
+      const disp=clamp((spread-0.9)/0.75, 0, 1);             // 分散
+      found.push({c:C,r,n,disp,fist,tips:[4,8,12,16,20].map(i=>pts[i]),pts});
+    }
+  }
+  if(found.length) lastHandTime=performance.now();
+  // 前フレームに最も近いスロットへ割当(手の入替りチラつき防止)
+  const used=[false,false];
+  for(const L of lens) L._hit=false;
+  for(const f of found){
+    let bi=-1,bd=1e9;
+    for(let i=0;i<2;i++){
+      if(used[i])continue;
+      const d=lens[i].p>0.05? dist(lens[i].c,f.c) : 8e5+i;
+      if(d<bd){bd=d;bi=i;}
+    }
+    if(bi<0)break;
+    used[bi]=true;
+    const L=lens[bi]; L._hit=true;
+    const k=L.p>0.05?0.45:1;
+    L.c=V(lerp(L.c.x,f.c.x,k),lerp(L.c.y,f.c.y,k));
+    L.r=lerp(L.r,f.r,k);
+    L.n=lerp(L.n,f.n,0.35);
+    L.disp=lerp(L.disp,f.disp,0.3);
+    L.fist=f.fist; L.tips=f.tips; L.skel=f.pts;
+  }
+  for(const L of lens){
+    L.p=lerp(L.p, L._hit?1:0, L._hit?0.4:0.12);
+    if(L.p<0.05) L.skel=null;
+  }
+}
+
+// ---------- optics(スネルの法則) ----------
+function refr(I,Nn,eta){ // Nn は入射に対向する法線
+  const ci=-dot(I,Nn);
+  const k=1-eta*eta*(1-ci*ci);
+  if(k<0){ // 全反射
+    return {v:norm(sub(I,mul(Nn,2*dot(I,Nn)))), tir:true};
+  }
+  return {v:norm(add(mul(I,eta),mul(Nn,eta*ci-Math.sqrt(k)))), tir:false};
+}
+function circleEntry(p,d,L){
+  const oc=sub(p,L.c);
+  const c=dot(oc,oc)-L.r*L.r;
+  if(c<=0) return null;              // すでに内側
+  const b=dot(oc,d);
+  const disc=b*b-c;
+  if(disc<=0) return null;
+  const t=-b-Math.sqrt(disc);
+  return t>0.6? t : null;
+}
+function circleExit(p,d,L){
+  const oc=sub(p,L.c);
+  const b=dot(oc,d);
+  const disc=b*b-(dot(oc,oc)-L.r*L.r);
+  if(disc<=0) return null;
+  const t=-b+Math.sqrt(disc);
+  return t>0.6? t : null;
+}
+
+// ---------- density grid(コースティクス検出) ----------
+let gw=1,gh=1,cell=52,counts,lastHotAt;
+function buildGrid(){
+  gw=Math.max(4,Math.ceil(W/cell));
+  gh=Math.max(4,Math.ceil(H/cell));
+  counts=new Uint8Array(gw*gh);
+  lastHotAt=new Float64Array(gw*gh);
+}
+function deposit(a,b,st){ // レイ1本につき同一セル1回だけカウント
+  const d=dist(a,b);
+  const steps=Math.max(1,Math.floor(d/18));
+  for(let i=0;i<=steps;i++){
+    const x=a.x+(b.x-a.x)*i/steps, y=a.y+(b.y-a.y)*i/steps;
+    if(x<0||y<0||x>=W||y>=H) continue;
+    const gi=(y/cell|0)*gw+(x/cell|0);
+    if(gi!==st.last){ if(counts[gi]<250)counts[gi]++; st.last=gi; }
+  }
+}
+
+// ---------- ray tracing ----------
+let rayPolys=[], absorbs=[], absorbedN=0, perfLow=false;
+const TINT={w:'rgba(175,225,255,.5)',r:'rgba(255,105,90,.55)',g:'rgba(120,255,160,.5)',b:'rgba(118,152,255,.55)'};
+
+function rayY(i,NR){const m=H*0.06;return m+(H-2*m)*(i+0.5)/NR;}
+
+function traceAll(t){
+  rayPolys.length=0; absorbs.length=0; absorbedN=0;
+  counts.fill(0);
+  const NR=perfLow?16:24;
+  for(let i=0;i<NR;i++){
+    const y=rayY(i,NR);
+    const a1=Math.sin(t*0.00042+i*0.73)*0.09+Math.sin(t*0.0011+i*2.1)*0.03;
+    trace(V(-6,y),  norm(V(Math.cos(a1), Math.sin(a1))),'w',null,0);
+    const a2=Math.sin(t*0.00038+i*1.31+3)*0.09+Math.sin(t*0.0009+i*1.7)*0.03;
+    trace(V(W+6,y), norm(V(-Math.cos(a2),Math.sin(a2))),'w',null,0);
+  }
+}
+
+function trace(o,d,tint,inside,depth){
+  let p=o, dir=d, remaining=(W+H)*1.35, events=0;
+  const pts=[p.x,p.y];
+  const st={last:-1};
+  while(remaining>4 && events<9){
+    let best=null;
+    if(inside){
+      const tE=circleExit(p,dir,inside);
+      if(tE!=null && tE<remaining) best={t:tE,L:inside,exit:true};
+    }else{
+      for(const L of activeL){
+        const tI=circleEntry(p,dir,L);
+        if(tI!=null && tI<remaining && (!best||tI<best.t)) best={t:tI,L,exit:false};
+      }
+    }
+    if(!best){
+      const q=add(p,mul(dir,remaining));
+      if(!inside) deposit(p,q,st);
+      pts.push(q.x,q.y);
+      break;
+    }
+    const q=add(p,mul(dir,best.t));
+    if(!inside) deposit(p,q,st);
+    pts.push(q.x,q.y);
+    remaining-=best.t; events++;
+    const L=best.L;
+
+    if(!best.exit){ // ---- 入射 ----
+      if(L.fist){ // ブラックホール:吸収
+        absorbedN++; absorbs.push(q);
+        rayPolys.push({pts,tint});
+        return;
+      }
+      // 分光:白色光を虹に割る(1回だけ)
+      if(depth===0 && tint==='w' && L.disp>0.18){
+        rayPolys.push({pts,tint});
+        const dn=L.disp*0.24;
+        const No=norm(sub(q,L.c));
+        const Nn=dot(No,dir)>0? mul(No,-1):No;
+        for(const [tc,off] of [['r',-dn],['g',0],['b',dn]]){
+          const rr=refr(dir,Nn,1/(L.n+off));
+          if(!rr.tir) trace(add(q,mul(rr.v,1.2)), rr.v, tc, L, depth+1);
+        }
+        return;
+      }
+      const No=norm(sub(q,L.c));
+      const Nn=dot(No,dir)>0? mul(No,-1):No;
+      const rr=refr(dir,Nn,1/L.n);
+      dir=rr.v; inside=rr.tir? null : L;
+    }else{ // ---- 出射 ----
+      const No=norm(sub(q,L.c));
+      const Nn=dot(No,dir)>0? mul(No,-1):No;
+      const rr=refr(dir,Nn,L.n);
+      dir=rr.v; inside=rr.tir? L : null; // 全反射なら内部に留まる
+    }
+    p=add(q,mul(dir,1.2));
+  }
+  rayPolys.push({pts,tint});
+}
+
+// ---------- analysis(収束エネルギー・きらめき発火) ----------
+let energy=0, cx=0.5, cyN=0.55;
+let hotCells=[], lastPluck=0, pluckBudget=9;
+function analyze(now){
+  hotCells.length=0;
+  let E=0,sx=0,sy=0,fired=0;
+  for(let gy=0;gy<gh;gy++){
+    for(let gx=0;gx<gw;gx++){
+      const gi=gy*gw+gx, c=counts[gi];
+      if(c<6) continue;
+      const e=c-5; E+=e;
+      const px=(gx+0.5)*cell, py=(gy+0.5)*cell;
+      sx+=px*e; sy+=py*e;
+      hotCells.push({x:px,y:py,c});
+      if(c>=8 && now-lastHotAt[gi]>420 && now-lastPluck>75 && fired<2 && pluckBudget>0){
+        lastHotAt[gi]=now; lastPluck=now; fired++; pluckBudget--;
+        pluck(1-py/H, px/W, Math.min(1,(c-7)/8));
+      }
+    }
+  }
+  if(E>0){ cx=sx/E/W; cyN=sy/E/H; }
+  energy=Math.min(1,E/60);
+}
+
+// ---------- audio ----------
+let AC=null, gains=[], shA,shB,gShim,gSub,lpNode,masterG,pluckBus;
+const F0=65.41; // C2
+function makeIR(sec,decay){
+  const rate=AC.sampleRate, len=Math.floor(rate*sec);
+  const buf=AC.createBuffer(2,len,rate);
+  for(let ch=0;ch<2;ch++){
+    const d=buf.getChannelData(ch);
+    for(let i=0;i<len;i++) d[i]=(Math.random()*2-1)*Math.pow(1-i/len,decay);
+  }
+  return buf;
+}
+function initAudio(){
+  AC=new (window.AudioContext||window.webkitAudioContext)();
+  const comp=AC.createDynamicsCompressor();
+  comp.threshold.value=-16; comp.ratio.value=5; comp.knee.value=18;
+  comp.connect(AC.destination);
+  lpNode=AC.createBiquadFilter();
+  lpNode.type='lowpass'; lpNode.frequency.value=13000; lpNode.Q.value=0.6;
+  lpNode.connect(comp);
+  masterG=AC.createGain(); masterG.gain.value=0.9;
+  masterG.connect(lpNode);
+  // リバーブ
+  const convo=AC.createConvolver(); convo.buffer=makeIR(2.4,2.4);
+  const wet=AC.createGain(); wet.gain.value=0.32;
+  lpNode.connect(convo); convo.connect(wet); wet.connect(comp);
+  // 倍音バンク(加算合成:光線=倍音)
+  for(let k=1;k<=12;k++){
+    const o=AC.createOscillator(); o.type='sine'; o.frequency.value=F0*k;
+    const g=AC.createGain(); g.gain.value=0;
+    o.connect(g); g.connect(masterG); o.start();
+    gains.push(g);
+  }
+  // 分光シマー
+  shA=AC.createOscillator(); shA.type='sine'; shA.frequency.value=F0*2;
+  shB=AC.createOscillator(); shB.type='sine'; shB.frequency.value=F0*3;
+  gShim=AC.createGain(); gShim.gain.value=0;
+  shA.connect(gShim); shB.connect(gShim); gShim.connect(masterG);
+  shA.start(); shB.start();
+  // ブラックホールのサブベース
+  const sO=AC.createOscillator(); sO.type='sine'; sO.frequency.value=F0/2;
+  gSub=AC.createGain(); gSub.gain.value=0;
+  sO.connect(gSub); gSub.connect(masterG); sO.start();
+  // きらめき用ピンポンディレイ
+  pluckBus=AC.createGain(); pluckBus.gain.value=0.9;
+  const dly=AC.createDelay(1); dly.delayTime.value=0.29;
+  const fb=AC.createGain(); fb.gain.value=0.35;
+  dly.connect(fb); fb.connect(dly);
+  pluckBus.connect(masterG); pluckBus.connect(dly); dly.connect(masterG);
+}
+const PENTA=[0,2,4,7,9];
+function pluck(h,xN,vel){ // 高さ→ペンタトニック、収束の強さ→音量
+  const idx=Math.floor(clamp(h,0,0.999)*15);
+  const midi=48+12*Math.floor(idx/5)+PENTA[idx%5];
+  const f=440*Math.pow(2,(midi-69)/12);
+  const t=AC.currentTime;
+  const v=0.05+vel*0.14;
+  const o=AC.createOscillator(); o.type='sine'; o.frequency.value=f;
+  const g=AC.createGain();
+  g.gain.setValueAtTime(0,t);
+  g.gain.linearRampToValueAtTime(v,t+0.006);
+  g.gain.exponentialRampToValueAtTime(0.0004,t+0.85);
+  const o2=AC.createOscillator(); o2.type='sine'; o2.frequency.value=f*2.001;
+  const g2=AC.createGain();
+  g2.gain.setValueAtTime(v*0.25,t);
+  g2.gain.exponentialRampToValueAtTime(0.0003,t+0.3);
+  o.connect(g); o2.connect(g2); g2.connect(pluckBus);
+  if(AC.createStereoPanner){
+    const pan=AC.createStereoPanner(); pan.pan.value=(xN*2-1)*0.7;
+    g.connect(pan); pan.connect(pluckBus);
+  } else g.connect(pluckBus);
+  o.start(t); o.stop(t+0.9);
+  o2.start(t); o2.stop(t+0.35);
+}
+let sE=0,sDark=0,sDisp=0;
+function audioUpdate(){
+  if(!AC) return;
+  const t=AC.currentTime;
+  sE=lerp(sE,energy,0.14);
+  sDark=lerp(sDark, Math.min(1,absorbedN/12), 0.1);
+  let dmax=0;
+  for(const L of activeL) if(!L.fist) dmax=Math.max(dmax,L.disp);
+  sDisp=lerp(sDisp,dmax,0.12);
+  // 収束点の高さ→どの倍音帯が輝くか
+  const yFocus=activeL.length? cyN : 0.72+Math.sin(t*0.13)*0.1;
+  const kC=1+(1-clamp(yFocus,0,1))*10;
+  const level=(0.05+sE*0.5)*(1-sDark*0.55);
+  for(let k=1;k<=12;k++){
+    const w=Math.exp(-Math.pow(k-kC,2)/(2*2.1*2.1));
+    gains[k-1].gain.setTargetAtTime(level*w*Math.pow(k,-0.6)*0.9, t, 0.09);
+  }
+  shA.detune.setTargetAtTime(sDisp*34,t,0.1);
+  shB.detune.setTargetAtTime(-sDisp*34,t,0.1);
+  gShim.gain.setTargetAtTime(sDisp*sE*0.28,t,0.1);
+  lpNode.frequency.setTargetAtTime(500+12500*Math.pow(1-sDark,2.2),t,0.14);
+  gSub.gain.setTargetAtTime(sDark*0.3,t,0.12);
+}
+
+// ---------- render ----------
+let ghostOn=true;
+function drawVideoCover(){
+  ctx.save();
+  ctx.translate(W,0); ctx.scale(-1,1); // ミラー表示
+  ctx.drawImage(video, cover.ox, cover.oy, cover.vw*cover.s, cover.vh*cover.s);
+  ctx.restore();
+}
+function bloom(x,y,rad,a,rgb='255,214,140'){
+  const g=ctx.createRadialGradient(x,y,0,x,y,rad);
+  g.addColorStop(0,`rgba(${rgb},${a})`);
+  g.addColorStop(1,`rgba(${rgb},0)`);
+  ctx.fillStyle=g;
+  ctx.beginPath(); ctx.arc(x,y,rad,0,7); ctx.fill();
+}
+const BONES=[[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],
+             [9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+
+function render(now){
+  // 残光フェード
+  ctx.globalCompositeOperation='source-over';
+  ctx.fillStyle='rgba(3,8,16,.26)';
+  ctx.fillRect(0,0,W,H);
+  if(ghostOn && video.readyState>=2){
+    ctx.globalAlpha=0.055; drawVideoCover(); ctx.globalAlpha=1;
+  }
+  ctx.globalCompositeOperation='lighter';
+  // エミッター(画面両端の光の裂け目)
+  const NR=perfLow?16:24;
+  ctx.fillStyle='rgba(160,220,255,.4)';
+  for(let i=0;i<NR;i++){
+    const y=rayY(i,NR);
+    ctx.fillRect(0,y-3,2.5,6);
+    ctx.fillRect(W-2.5,y-3,2.5,6);
+  }
+  // 光線
+  ctx.lineCap='round';
+  for(const r of rayPolys){
+    ctx.strokeStyle=TINT[r.tint];
+    ctx.lineWidth=r.tint==='w'?1.1:1.0;
+    ctx.beginPath();
+    ctx.moveTo(r.pts[0],r.pts[1]);
+    for(let i=2;i<r.pts.length;i+=2) ctx.lineTo(r.pts[i],r.pts[i+1]);
+    ctx.stroke();
+  }
+  // コースティクス(金の結像)
+  for(const hc of hotCells){
+    bloom(hc.x,hc.y, 12+(hc.c-5)*2.5, Math.min(0.5,(hc.c-5)*0.05));
+  }
+  if(energy>0.1){
+    const bx=cx*W, by=cyN*H, R=30+energy*90;
+    bloom(bx,by,R,0.2+energy*0.25);
+    for(let i=0;i<3;i++){
+      const a0=now*0.0016*(i%2?1:-1)+i*2.1;
+      ctx.beginPath();
+      ctx.arc(bx,by,R*(0.35+i*0.16),a0,a0+2.4-i*0.5);
+      ctx.lineWidth=1.4;
+      ctx.strokeStyle='rgba(255,220,150,.3)';
+      ctx.stroke();
+    }
+  }
+  // 吸収の火花
+  for(const q of absorbs) bloom(q.x,q.y,7,0.35,'170,110,255');
+  // レンズ描画
+  for(const L of lens){
+    if(L.p<0.05 || L.r<10) continue;
+    const al=L.p;
+    if(L.fist){
+      ctx.globalCompositeOperation='source-over';
+      const g=ctx.createRadialGradient(L.c.x,L.c.y,0,L.c.x,L.c.y,L.r);
+      g.addColorStop(0,`rgba(2,0,8,${0.92*al})`);
+      g.addColorStop(0.75,`rgba(4,0,12,${0.6*al})`);
+      g.addColorStop(1,'rgba(4,0,12,0)');
+      ctx.fillStyle=g;
+      ctx.beginPath(); ctx.arc(L.c.x,L.c.y,L.r,0,7); ctx.fill();
+      ctx.globalCompositeOperation='lighter';
+      ctx.setLineDash([10,14]);
+      ctx.lineDashOffset=-now*0.05;
+      ctx.strokeStyle=`rgba(150,90,255,${0.5*al})`;
+      ctx.lineWidth=1.6;
+      ctx.beginPath(); ctx.arc(L.c.x,L.c.y,L.r,0,7); ctx.stroke();
+      ctx.setLineDash([]);
+    }else{
+      // ガラスの円環
+      ctx.strokeStyle=`rgba(150,205,255,${0.4*al})`;
+      ctx.lineWidth=1.4;
+      ctx.beginPath(); ctx.arc(L.c.x,L.c.y,L.r,0,7); ctx.stroke();
+      const g=ctx.createRadialGradient(L.c.x,L.c.y,L.r*0.4,L.c.x,L.c.y,L.r);
+      g.addColorStop(0,'rgba(130,190,255,0)');
+      g.addColorStop(1,`rgba(130,190,255,${0.07*al})`);
+      ctx.fillStyle=g;
+      ctx.beginPath(); ctx.arc(L.c.x,L.c.y,L.r,0,7); ctx.fill();
+      // 屈折率メーター(金の弧)
+      const pow=(L.n-1.14)/1.31;
+      ctx.strokeStyle=`rgba(255,220,160,${0.4*al})`;
+      ctx.lineWidth=2.2;
+      ctx.beginPath();
+      ctx.arc(L.c.x,L.c.y,L.r+5,-Math.PI/2,-Math.PI/2+pow*Math.PI*2);
+      ctx.stroke();
+      // 指先の光点
+      for(const tp of L.tips) bloom(tp.x,tp.y,6,0.35*al,'190,235,255');
+      // 骨格(かすかに)
+      if(L.skel){
+        ctx.strokeStyle=`rgba(160,210,255,${0.07*al})`;
+        ctx.lineWidth=1;
+        ctx.beginPath();
+        for(const [a,b] of BONES){
+          ctx.moveTo(L.skel[a].x,L.skel[a].y);
+          ctx.lineTo(L.skel[b].x,L.skel[b].y);
+        }
+        ctx.stroke();
+      }
+    }
+  }
+  ctx.globalCompositeOperation='source-over';
+}
+
+// ---------- main loop ----------
+let landmarker=null, started=false;
+let lastVT=-1, frameI=0, dtAvg=16, lastT=performance.now();
+function loop(now){
+  requestAnimationFrame(loop);
+  const dt=now-lastT; lastT=now;
+  dtAvg=dtAvg*0.94+dt*0.06;
+  perfLow=dtAvg>36;
+  const detectEvery=dtAvg>40?2:1;
+  frameI++;
+  if(video.readyState>=2 && landmarker && frameI%detectEvery===0 && video.currentTime!==lastVT){
+    lastVT=video.currentTime;
+    updateCover();
+    try{ updateHands(landmarker.detectForVideo(video, now)); }catch(e){}
+  }
+  activeL=lens.filter(L=>L.p>0.35 && L.r>10);
+  traceAll(now);
+  analyze(now);
+  render(now);
+  audioUpdate();
+  hintEl.classList.toggle('on', started && now-lastHandTime>6000);
+}
+
+// ---------- boot ----------
+resize();
+(async()=>{
+  try{
+    const {HandLandmarker,FilesetResolver}=await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm');
+    const files=await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
+    landmarker=await HandLandmarker.createFromOptions(files,{
+      baseOptions:{
+        modelAssetPath:'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+        delegate:'GPU'
+      },
+      runningMode:'VIDEO', numHands:2,
+      minHandDetectionConfidence:0.4,
+      minHandPresenceConfidence:0.4,
+      minTrackingConfidence:0.4
+    });
+    statusEl.textContent='準備完了';
+    startBtn.disabled=false;
+  }catch(e){
+    statusEl.textContent='読み込みに失敗しました。通信環境を確認して再読み込みしてください。';
+  }
+})();
+
+startBtn.addEventListener('click', async ()=>{
+  if(started) return;
+  try{
+    initAudio();
+    await AC.resume();
+    const stream=await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:'user',width:{ideal:640},height:{ideal:480}}, audio:false
+    });
+    video.srcObject=stream;
+    await video.play();
+    started=true;
+    lastHandTime=performance.now();
+    overlay.classList.add('hide');
+    setInterval(()=>{pluckBudget=9;},1000);
+    requestAnimationFrame(loop);
+  }catch(e){
+    statusEl.textContent='カメラを利用できません。設定 → Safari → カメラ を許可してください。';
+  }
+});
+
+// ---------- UI ----------
+document.getElementById('bGuide').addEventListener('click',()=>guideEl.classList.add('on'));
+guideEl.addEventListener('click',()=>guideEl.classList.remove('on'));
+document.getElementById('bGhost').addEventListener('click',e=>{
+  ghostOn=!ghostOn;
+  e.currentTarget.classList.toggle('off',!ghostOn);
+});
+
+// ---------- iOS Safari 対策 ----------
+document.addEventListener('touchmove',e=>e.preventDefault(),{passive:false});
+document.addEventListener('gesturestart',e=>e.preventDefault());
+document.addEventListener('visibilitychange',()=>{
+  if(!AC) return;
+  document.hidden? AC.suspend() : AC.resume();
+});
+</script>
+</body>
+</html>
