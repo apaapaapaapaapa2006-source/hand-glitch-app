@@ -27,8 +27,9 @@
   .screen.on{display:block;}
 
   /* ---------- HOME ---------- */
-  #home{display:flex;flex-direction:column;justify-content:space-between;
+  #home{flex-direction:column;justify-content:space-between;
     padding:calc(env(safe-area-inset-top) + 34px) 26px calc(env(safe-area-inset-bottom) + 30px);}
+  #home.on{display:flex;}
   .brand{font-weight:700;letter-spacing:.34em;font-size:13px;color:var(--muted);}
   .hero{margin-top:auto;margin-bottom:auto;}
   .hero h1{font-size:40px;line-height:1.08;font-weight:700;letter-spacing:-.02em;margin:0 0 16px;}
@@ -79,7 +80,8 @@
   .perm-overlay p{color:var(--muted);font-size:14px;line-height:1.5;margin:0 0 22px;max-width:20em;}
 
   /* ---------- PROCESSING ---------- */
-  #processing{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:22px;}
+  #processing{flex-direction:column;align-items:center;justify-content:center;gap:22px;}
+  #processing.on{display:flex;}
   #procball{width:180px;height:180px;}
   #processing .lab{font-size:20px;font-weight:600;}
   #processing .sub{color:var(--muted);font-size:13.5px;margin-top:-12px;}
