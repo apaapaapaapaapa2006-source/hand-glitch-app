@@ -135,7 +135,7 @@
   .asset .meta{flex:1;min-width:0;}
   .asset .meta .nm{font-weight:600;font-size:15px;}
   .asset .meta .st{color:var(--green);font-size:12px;margin-top:3px;}
-  .asset .go{color:var(--muted);font-size:20px;}
+  .asset .del{border:none;background:transparent;color:var(--muted);font-size:17px;padding:10px 6px;}
   .empty{color:var(--muted);text-align:center;margin-top:60px;font-size:14px;}
   .back{color:var(--muted);font-size:14px;margin-bottom:16px;display:inline-block;}
 </style>
@@ -234,8 +234,10 @@
 /* =========================================================================
    PANORA — single-file 360° capture / stitch / viewer
    - Aim the reticle at green targets → auto capture 16 shots, in order
-   - Each shot is stored with its device orientation (yaw/pitch)
-   - Viewer rebuilds the space by placing each shot in 3D at its direction
+   - Each shot stores the full device quaternion (yaw/pitch/roll) so the
+     viewer can rebuild the space with roll compensation
+   - Shots only fire while the device is held still (sharpness gate)
+   - Gallery persists in IndexedDB
    - Export renders the scene to an equirectangular PNG
    NOTE: needs HTTPS + camera + motion permission (iOS Safari).
    ========================================================================= */
@@ -250,9 +252,10 @@ function show(id){ Object.values(screens).forEach(s=>s.classList.remove('on')); 
 const HFOV_DEG = 63;          // assumed camera horizontal FOV
 const ALIGN_NDC = 0.13;       // how close to center a dot must be to lock
 const CAPTURE_MS = 700;       // hold time to complete a shot
-const SNAP_W = 1024;          // stored snapshot width
+const SNAP_W = 1280;          // stored snapshot width
 const FLIP_TEXTURE_X = true;  // set false if the panorama comes out mirrored
 const GUIDE_THRESH = 8*Math.PI/180; // angle before showing a turn arrow
+const STILL_MAX = 0.6;        // rad/s — rotating faster than this restarts the hold
 
 /* ---- target directions (16): horizon ring, then up ring, then down ring ---- */
 /* Capture is enforced in this order so the on-screen dot always shows the
@@ -298,7 +301,8 @@ function onOrient(e){
 /* =====================  APP STATE  ===================== */
 let stream=null, targets=[], shots=[], captureRAF=null;
 let holdTarget=-1, holdStart=0;
-const gallery=[]; // {name, thumb, shots:[{img,yaw,pitch}]}
+const lastQuat=new V.Quaternion(); let lastQuatT=0, angSpeed=0;
+const gallery=[]; // {id?, name, thumb, shots:[{img,yaw,pitch,quat?,aspect?}]}
 
 /* =====================  CAMERA / PERMISSIONS  ===================== */
 async function requestMotion(){
@@ -358,7 +362,8 @@ function updateProgress(){
 }
 function phaseCount(phase){ return targets.filter(t=>t.phase===phase).length; }
 function phaseDone(phase){ return targets.filter(t=>t.phase===phase && t.done).length; }
-function updateHint(t){
+function updateHint(t,locked){
+  if(locked){ $('#capHint').textContent='そのまま静止…'; return; }
   const total=phaseCount(t.phase), done=phaseDone(t.phase);
   const modeMsg = haveOrientation ? '緑の丸にリングを合わせて' : '画面をドラッグして緑の丸をリングへ';
   $('#capHint').textContent = PHASE_LABEL[t.phase]+' ('+(done+1)+'/'+total+') · '+modeMsg;
@@ -395,7 +400,9 @@ function captureFrame(t){
   const img=new Image(); img.src=c.toDataURL('image/jpeg',0.85);
   const fwd=currentForward();
   const yaw=Math.atan2(fwd.x,-fwd.z), pitch=Math.asin(Math.max(-1,Math.min(1,fwd.y)));
-  shots.push({img, yaw, pitch});
+  const shot={img, yaw, pitch, aspect: ch/cw};
+  if(haveOrientation) shot.quat=[deviceQuat.x,deviceQuat.y,deviceQuat.z,deviceQuat.w];
+  shots.push(shot);
   t.done=true; t.el.classList.add('done'); t.el.querySelector('.fill').style.setProperty('--p','0%');
   navigator.vibrate && navigator.vibrate(20);
   if(updateProgress()===targets.length) finishCapture();
@@ -404,11 +411,16 @@ function captureFrame(t){
 function captureTick(){
   captureRAF=requestAnimationFrame(captureTick);
   const reticle=$('#reticle');
+  const nowT=performance.now();
+  if(haveOrientation){
+    const dt=(nowT-lastQuatT)/1000;
+    if(dt>0 && dt<0.5) angSpeed=lastQuat.angleTo(deviceQuat)/dt;
+    lastQuat.copy(deviceQuat); lastQuatT=nowT;
+  }else angSpeed=0;
   const idx=targets.findIndex(tg=>!tg.done);
   if(idx<0) return;
   targets.forEach((tg,i)=>{ if(i!==idx) tg.el.style.opacity=0; });
   const t=targets[idx];
-  updateHint(t);
   const p = haveOrientation ? projectToScreen(worldDirOfTarget(t)) : t.fallback;
   if(p){
     t.el.style.opacity=1;
@@ -418,10 +430,12 @@ function captureTick(){
   }
   updateGuideArrows(t,p);
   const locked = !!(p && p.ndc<ALIGN_NDC);
+  updateHint(t,locked);
   if(locked){
     reticle.classList.add('lock');
-    if(holdTarget!==idx){ holdTarget=idx; holdStart=performance.now(); }
-    const prog=Math.min(1,(performance.now()-holdStart)/CAPTURE_MS);
+    if(holdTarget!==idx){ holdTarget=idx; holdStart=nowT; }
+    if(angSpeed>STILL_MAX) holdStart=nowT; // still moving → restart so only sharp frames capture
+    const prog=Math.min(1,(nowT-holdStart)/CAPTURE_MS);
     t.el.querySelector('.fill').style.setProperty('--p',(prog*100)+'%');
     if(prog>=1){ captureFrame(t); holdTarget=-1; }
   }else{
@@ -555,19 +569,28 @@ function buildScene(shotsArr){
   camera=new V.PerspectiveCamera(72,innerWidth/innerHeight,0.05,100);
 
   const R=10;
-  const hf=HFOV_DEG*Math.PI/180, vf=2*Math.atan(Math.tan(hf/2)*0.75);
+  const hf=HFOV_DEG*Math.PI/180;
   shotMeshes=[];
-  // sort back-to-front by capture order isn't needed since planes only touch
-  // at their edges, but stitch order matters visually for overlaps
-  shotsArr.forEach(s=>{
+  shotsArr.forEach((s,i)=>{
     const tex=makeFeatheredTexture(s.img);
-    const w=2*R*Math.tan(hf/2)*1.32, h=2*R*Math.tan(vf/2)*1.32;
+    const w=2*R*Math.tan(hf/2)*1.32;
+    const h=w*(s.aspect||0.75);   // plane matches the real capture aspect
     const geo=new V.PlaneGeometry(w,h,1,1);
     const mat=new V.MeshBasicMaterial({map:tex,transparent:true,depthWrite:false,side:V.DoubleSide});
     const m=new V.Mesh(geo,mat);
-    const dir=dirFromYawPitch(s.yaw,s.pitch);
-    m.position.copy(dir.clone().multiplyScalar(R));
-    m.lookAt(0,0,0);
+    let dir;
+    if(s.quat){
+      // full device orientation: yaw+pitch+roll, so tilted shots line up
+      const q=new V.Quaternion(s.quat[0],s.quat[1],s.quat[2],s.quat[3]);
+      dir=new V.Vector3(0,0,-1).applyQuaternion(q);
+      m.position.copy(dir.clone().multiplyScalar(R));
+      m.quaternion.copy(q);
+    }else{
+      dir=dirFromYawPitch(s.yaw,s.pitch);
+      m.position.copy(dir.clone().multiplyScalar(R));
+      m.lookAt(0,0,0);
+    }
+    m.renderOrder=i;
     m.userData.dir=dir.clone(); m.userData.baseR=R;
     scene.add(m); shotMeshes.push(m);
   });
@@ -584,12 +607,14 @@ function renderView(){
   renderer.render(scene,camera);
 }
 
-function openViewer(asset){
+async function openViewer(asset){
   currentAsset=asset;
   $('#vTitle').textContent=asset.name;
   vYaw=0; vPitch=0; gyroLook=false; mode3d=false;
   $('#btnGyro').classList.remove('on'); $('#btn3d').classList.remove('on');
   show('viewer');
+  // persisted shots decode asynchronously — wait so textures aren't blank
+  await Promise.all(asset.shots.map(s=>(s.img.decode?s.img.decode():Promise.resolve()).catch(()=>{})));
   buildScene(asset.shots);
   cancelAnimationFrame(viewRAF); renderView();
   saveToGallery(asset);
@@ -624,12 +649,14 @@ $('#btnGyro').onclick=async ()=>{
   gyroLook=!gyroLook; $('#btnGyro').classList.toggle('on',gyroLook);
   toast(gyroLook?'ジャイロで見回し':'ドラッグで見回し');
 };
-/* pseudo-3D: push shots out by brightness for a subtle parallax */
+/* pseudo-3D: push shots out for a subtle parallax */
 $('#btn3d').onclick=()=>{
   mode3d=!mode3d; $('#btn3d').classList.toggle('on',mode3d);
   shotMeshes.forEach(m=>{
     const r=m.userData.baseR*(mode3d?1.14:1);
-    m.position.copy(m.userData.dir.clone().multiplyScalar(r)); m.lookAt(0,0,0);
+    const q=m.quaternion.clone();
+    m.position.copy(m.userData.dir.clone().multiplyScalar(r));
+    m.quaternion.copy(q);
   });
   camera.fov=mode3d?82:72; camera.updateProjectionMatrix();
   toast(mode3d?'3D World(近似・視差プレビュー)':'360°ビュー');
@@ -675,11 +702,50 @@ $('#btnSave').onclick=()=>{
   }catch(err){ console.error(err); toast('保存に失敗しました'); }
 };
 
+/* =====================  PERSISTENCE (IndexedDB)  ===================== */
+function dbOpen(){
+  return new Promise((res,rej)=>{
+    const r=indexedDB.open('panora',1);
+    r.onupgradeneeded=()=>{ r.result.createObjectStore('spaces',{keyPath:'id',autoIncrement:true}); };
+    r.onsuccess=()=>res(r.result);
+    r.onerror=()=>rej(r.error);
+  });
+}
+async function dbPut(rec){
+  const db=await dbOpen();
+  return new Promise((res,rej)=>{
+    const tx=db.transaction('spaces','readwrite');
+    const rq=tx.objectStore('spaces').put(rec);
+    rq.onsuccess=()=>res(rq.result);
+    tx.onerror=()=>rej(tx.error);
+  });
+}
+async function dbAll(){
+  const db=await dbOpen();
+  return new Promise((res,rej)=>{
+    const rq=db.transaction('spaces').objectStore('spaces').getAll();
+    rq.onsuccess=()=>res(rq.result||[]);
+    rq.onerror=()=>rej(rq.error);
+  });
+}
+async function dbDel(id){
+  const db=await dbOpen();
+  return new Promise((res,rej)=>{
+    const tx=db.transaction('spaces','readwrite');
+    tx.objectStore('spaces').delete(id);
+    tx.oncomplete=()=>res();
+    tx.onerror=()=>rej(tx.error);
+  });
+}
+
 /* =====================  GALLERY  ===================== */
 function saveToGallery(asset){
   if(asset._saved) return; asset._saved=true;
   const thumb=asset.shots[0]?asset.shots[0].img.src:'';
   asset.thumb=thumb; gallery.unshift(asset); refreshGallery();
+  const rec={ name:asset.name, thumb,
+    shots:asset.shots.map(s=>({src:s.img.src, yaw:s.yaw, pitch:s.pitch, quat:s.quat||null, aspect:s.aspect||null})) };
+  dbPut(rec).then(id=>{ asset.id=id; }).catch(err=>{ console.warn('persist failed',err); });
 }
 function refreshGallery(){
   $('#galCount').textContent=gallery.length;
@@ -690,8 +756,14 @@ function refreshGallery(){
   gallery.forEach((a,i)=>{
     const el=document.createElement('div'); el.className='asset';
     el.innerHTML=`<img src="${a.thumb}"><div class="meta"><div class="nm">${a.name}</div>
-      <div class="st">Complete · ${a.shots.length} shots</div></div><div class="go">›</div>`;
+      <div class="st">Complete · ${a.shots.length} shots</div></div><button class="del">✕</button>`;
     el.onclick=()=>openViewer(a);
+    el.querySelector('.del').onclick=(e)=>{
+      e.stopPropagation();
+      if(a.id!=null) dbDel(a.id).catch(()=>{});
+      gallery.splice(gallery.indexOf(a),1);
+      refreshGallery();
+    };
     list.appendChild(el);
   });
 }
@@ -721,6 +793,18 @@ window.addEventListener('resize',()=>{ if(renderer&&camera){
   camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); } });
 
 refreshGallery();
+(async ()=>{
+  try{
+    const recs=await dbAll();
+    recs.sort((a,b)=>b.id-a.id);
+    recs.forEach(r=>{
+      gallery.push({ id:r.id, name:r.name, thumb:r.thumb, _saved:true,
+        shots:(r.shots||[]).map(o=>{ const img=new Image(); img.src=o.src;
+          return {img, yaw:o.yaw, pitch:o.pitch, quat:o.quat||undefined, aspect:o.aspect||undefined}; }) });
+    });
+  }catch(err){ console.warn('gallery load failed',err); }
+  refreshGallery();
+})();
 </script>
 </body>
 </html>
