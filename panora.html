@@ -58,10 +58,20 @@
     transform:rotate(-45deg) translate(1px,-2px);}
   .dot .fill{position:absolute;inset:0;border-radius:50%;
     background:conic-gradient(#eaffe9 var(--p,0%), transparent 0);opacity:.9;}
+  .dot .num{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+    font-size:14px;font-weight:700;color:#04170a;}
   #reticle{position:absolute;left:50%;top:50%;width:86px;height:86px;margin:-43px 0 0 -43px;
     border:3px solid rgba(255,255,255,.92);border-radius:50%;pointer-events:none;
     box-shadow:0 0 0 2px rgba(0,0,0,.25),inset 0 0 0 2px rgba(0,0,0,.18);}
   #reticle.lock{border-color:var(--green);box-shadow:0 0 22px 3px rgba(52,208,88,.6);}
+  .garrows{position:absolute;inset:0;pointer-events:none;}
+  .garrow{position:absolute;color:var(--green);font-size:28px;font-weight:700;
+    text-shadow:0 0 10px rgba(52,208,88,.85),0 1px 4px rgba(0,0,0,.6);opacity:0;transition:opacity .15s;}
+  .garrow.show{opacity:1;}
+  .garrow.gu{left:50%;top:calc(50% - 132px);transform:translateX(-50%);}
+  .garrow.gd{left:50%;top:calc(50% + 96px);transform:translateX(-50%);}
+  .garrow.gl{left:calc(50% - 132px);top:50%;transform:translateY(-50%);}
+  .garrow.gr{left:calc(50% + 96px);top:50%;transform:translateY(-50%);}
   .cap-top{position:absolute;left:0;right:0;top:0;padding:calc(env(safe-area-inset-top) + 14px) 18px 0;
     display:flex;justify-content:space-between;align-items:center;}
   .rbtn{width:44px;height:44px;border-radius:50%;border:none;background:rgba(20,22,26,.72);
@@ -155,6 +165,12 @@
   <section id="capture" class="screen">
     <video id="cam" playsinline muted autoplay></video>
     <div id="dots"></div>
+    <div class="garrows">
+      <div class="garrow gu" id="gArrowUp">▲</div>
+      <div class="garrow gd" id="gArrowDown">▼</div>
+      <div class="garrow gl" id="gArrowLeft">◀</div>
+      <div class="garrow gr" id="gArrowRight">▶</div>
+    </div>
     <div id="reticle"></div>
     <div class="cap-top">
       <button class="rbtn" id="undoBtn">↺</button>
@@ -217,7 +233,7 @@
 "use strict";
 /* =========================================================================
    PANORA — single-file 360° capture / stitch / viewer
-   - Aim the reticle at green targets → auto capture 16 shots
+   - Aim the reticle at green targets → auto capture 16 shots, in order
    - Each shot is stored with its device orientation (yaw/pitch)
    - Viewer rebuilds the space by placing each shot in 3D at its direction
    - Export renders the scene to an equirectangular PNG
@@ -236,20 +252,26 @@ const ALIGN_NDC = 0.13;       // how close to center a dot must be to lock
 const CAPTURE_MS = 700;       // hold time to complete a shot
 const SNAP_W = 1024;          // stored snapshot width
 const FLIP_TEXTURE_X = true;  // set false if the panorama comes out mirrored
+const GUIDE_THRESH = 8*Math.PI/180; // angle before showing a turn arrow
 
-/* ---- target directions (16): horizon ring + up/down rings ---- */
+/* ---- target directions (16): horizon ring, then up ring, then down ring ---- */
+/* Capture is enforced in this order so the on-screen dot always shows the
+   single next shot to take (with a number badge + direction arrows). */
+const PHASE_LABEL = { h:'水平に一周', u:'上に向けて', d:'下に向けて' };
 function buildTargets(){
   const t=[];
   const d2r=Math.PI/180;
-  for(let i=0;i<8;i++) t.push({yaw:i*45*d2r, pitch:0});
-  for(let i=0;i<4;i++) t.push({yaw:i*90*d2r, pitch: 45*d2r});
-  for(let i=0;i<4;i++) t.push({yaw:i*90*d2r, pitch:-45*d2r});
+  for(let i=0;i<8;i++) t.push({yaw:i*45*d2r, pitch:0, phase:'h'});
+  for(let i=0;i<4;i++) t.push({yaw:i*90*d2r, pitch: 45*d2r, phase:'u'});
+  for(let i=0;i<4;i++) t.push({yaw:i*90*d2r, pitch:-45*d2r, phase:'d'});
+  t.forEach((tg,i)=>tg.n=i+1);
   return t;
 }
 function dirFromYawPitch(yaw,pitch){
   const cp=Math.cos(pitch);
   return new V.Vector3(Math.sin(yaw)*cp, Math.sin(pitch), -Math.cos(yaw)*cp).normalize();
 }
+function normAngle(a){ while(a>Math.PI)a-=2*Math.PI; while(a<-Math.PI)a+=2*Math.PI; return a; }
 
 /* =====================  ORIENTATION  ===================== */
 const zee=new V.Vector3(0,0,1);
@@ -321,7 +343,8 @@ function buildDots(){
   const wrap=$('#dots'); wrap.innerHTML='';
   targets.forEach((t,i)=>{
     const el=document.createElement('div'); el.className='dot'; el.dataset.i=i;
-    el.innerHTML='<div class="fill"></div>';
+    el.innerHTML='<div class="fill"></div><span class="num">'+t.n+'</span>';
+    el.style.opacity=0;
     wrap.appendChild(el); t.el=el; t.done=false;
   });
   $('#ptotal').textContent=targets.length;
@@ -332,6 +355,34 @@ function updateProgress(){
   $('#pnow').textContent=done;
   $('#pbarFill').style.width=(done/targets.length*100)+'%';
   return done;
+}
+function phaseCount(phase){ return targets.filter(t=>t.phase===phase).length; }
+function phaseDone(phase){ return targets.filter(t=>t.phase===phase && t.done).length; }
+function updateHint(t){
+  const total=phaseCount(t.phase), done=phaseDone(t.phase);
+  const modeMsg = haveOrientation ? '緑の丸にリングを合わせて' : '画面をドラッグして緑の丸をリングへ';
+  $('#capHint').textContent = PHASE_LABEL[t.phase]+' ('+(done+1)+'/'+total+') · '+modeMsg;
+}
+function updateGuideArrows(t,p){
+  const up=$('#gArrowUp'),dn=$('#gArrowDown'),lf=$('#gArrowLeft'),rt=$('#gArrowRight');
+  up.classList.remove('show'); dn.classList.remove('show'); lf.classList.remove('show'); rt.classList.remove('show');
+  if(p && p.ndc<ALIGN_NDC) return; // already centered, no arrow needed
+  if(haveOrientation){
+    const targetYaw=t.yaw+(yawOrigin||0);
+    const fwd=currentForward();
+    const curYaw=Math.atan2(fwd.x,-fwd.z), curPitch=Math.asin(Math.max(-1,Math.min(1,fwd.y)));
+    const dyaw=normAngle(targetYaw-curYaw);
+    const dpitch=t.pitch-curPitch;
+    if(dyaw>GUIDE_THRESH) rt.classList.add('show');
+    else if(dyaw<-GUIDE_THRESH) lf.classList.add('show');
+    if(dpitch>GUIDE_THRESH) up.classList.add('show');
+    else if(dpitch<-GUIDE_THRESH) dn.classList.add('show');
+  } else if(p){
+    const cx=window.innerWidth/2, cy=window.innerHeight/2;
+    const dx=p.x-cx, dy=p.y-cy;
+    if(dx>40) rt.classList.add('show'); else if(dx<-40) lf.classList.add('show');
+    if(dy>40) dn.classList.add('show'); else if(dy<-40) up.classList.add('show');
+  }
 }
 
 function captureFrame(t){
@@ -353,21 +404,26 @@ function captureFrame(t){
 function captureTick(){
   captureRAF=requestAnimationFrame(captureTick);
   const reticle=$('#reticle');
-  let lock=-1, best=999;
-  targets.forEach((t,i)=>{
-    if(t.done){ t.el.style.opacity=.35; return; }
-    let p = haveOrientation ? projectToScreen(worldDirOfTarget(t)) : t.fallback;
-    if(!p){ t.el.style.opacity=0; return; }
+  const idx=targets.findIndex(tg=>!tg.done);
+  if(idx<0) return;
+  targets.forEach((tg,i)=>{ if(i!==idx) tg.el.style.opacity=0; });
+  const t=targets[idx];
+  updateHint(t);
+  const p = haveOrientation ? projectToScreen(worldDirOfTarget(t)) : t.fallback;
+  if(p){
     t.el.style.opacity=1;
     t.el.style.left=p.x+'px'; t.el.style.top=p.y+'px';
-    if(p.ndc<best){ best=p.ndc; if(p.ndc<ALIGN_NDC) lock=i; }
-  });
-  if(lock>=0){
+  }else{
+    t.el.style.opacity=0;
+  }
+  updateGuideArrows(t,p);
+  const locked = !!(p && p.ndc<ALIGN_NDC);
+  if(locked){
     reticle.classList.add('lock');
-    if(holdTarget!==lock){ holdTarget=lock; holdStart=performance.now(); }
+    if(holdTarget!==idx){ holdTarget=idx; holdStart=performance.now(); }
     const prog=Math.min(1,(performance.now()-holdStart)/CAPTURE_MS);
-    targets[lock].el.querySelector('.fill').style.setProperty('--p',(prog*100)+'%');
-    if(prog>=1){ captureFrame(targets[lock]); holdTarget=-1; }
+    t.el.querySelector('.fill').style.setProperty('--p',(prog*100)+'%');
+    if(prog>=1){ captureFrame(t); holdTarget=-1; }
   }else{
     reticle.classList.remove('lock');
     if(holdTarget>=0 && targets[holdTarget]) targets[holdTarget].el.querySelector('.fill').style.setProperty('--p','0%');
@@ -377,7 +433,6 @@ function captureTick(){
 
 /* Fallback (no gyro): drag to move targets under the reticle */
 function enableDragFallback(){
-  $('#capHint').textContent='画面をドラッグして緑の丸をリングへ';
   const cx=window.innerWidth/2, cy=window.innerHeight/2, R=Math.min(cx,cy)*1.1;
   targets.forEach((t)=>{
     const d=worldDirOfTarget(t);
@@ -482,7 +537,7 @@ function makeFeatheredTexture(img){
   // soft edges so overlapping shots blend
   g.globalCompositeOperation='destination-in';
   const gx=g.createLinearGradient(0,0,iw,0);
-  const e=0.16; gx.addColorStop(0,'rgba(0,0,0,0)');gx.addColorStop(e,'#000');gx.addColorStop(1-e,'#000');gx.addColorStop(1,'rgba(0,0,0,0)');
+  const e=0.26; gx.addColorStop(0,'rgba(0,0,0,0)');gx.addColorStop(e,'#000');gx.addColorStop(1-e,'#000');gx.addColorStop(1,'rgba(0,0,0,0)');
   g.fillStyle=gx; g.fillRect(0,0,iw,ih);
   const gy=g.createLinearGradient(0,0,0,ih);
   gy.addColorStop(0,'rgba(0,0,0,0)');gy.addColorStop(e,'#000');gy.addColorStop(1-e,'#000');gy.addColorStop(1,'rgba(0,0,0,0)');
@@ -502,9 +557,11 @@ function buildScene(shotsArr){
   const R=10;
   const hf=HFOV_DEG*Math.PI/180, vf=2*Math.atan(Math.tan(hf/2)*0.75);
   shotMeshes=[];
+  // sort back-to-front by capture order isn't needed since planes only touch
+  // at their edges, but stitch order matters visually for overlaps
   shotsArr.forEach(s=>{
     const tex=makeFeatheredTexture(s.img);
-    const w=2*R*Math.tan(hf/2)*1.18, h=2*R*Math.tan(vf/2)*1.18;
+    const w=2*R*Math.tan(hf/2)*1.32, h=2*R*Math.tan(vf/2)*1.32;
     const geo=new V.PlaneGeometry(w,h,1,1);
     const mat=new V.MeshBasicMaterial({map:tex,transparent:true,depthWrite:false,side:V.DoubleSide});
     const m=new V.Mesh(geo,mat);
