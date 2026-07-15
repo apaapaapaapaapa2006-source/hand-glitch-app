@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>DISSOLVE — APARTMENT</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    width:100%; height:100%;
+    background:#000; color:#eaeaea;
+    overflow:hidden; touch-action:none; overscroll-behavior:none;
+    font-family:'Helvetica Neue', Helvetica, Arial, sans-serif;
+    -webkit-user-select:none; user-select:none;
+    -webkit-tap-highlight-color:transparent;
+  }
+  #stage {
+    position:fixed; inset:0;
+    display:grid; place-items:center;
+    background:#000;
+  }
+  #view {
+    width:min(100vw, calc(100vh * 4 / 3));
+    height:min(100vh, calc(100vw * 3 / 4));
+    width:min(100dvw, calc(100dvh * 4 / 3));
+    height:min(100dvh, calc(100dvw * 3 / 4));
+    image-rendering:pixelated;
+    image-rendering:crisp-edges;
+    background:#000;
+  }
+  /* iOS Safariでは display:none のvideoが停止することがあるため不可視配置 */
+  #cam {
+    position:fixed; top:0; left:0;
+    width:2px; height:2px; opacity:0.01;
+    pointer-events:none;
+  }
+
+  /* ---- HUD ---- */
+  .mono { font-family:ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace; }
+  #hud { position:fixed; inset:0; pointer-events:none; opacity:0; transition:opacity .8s ease; }
+  #hud.show { opacity:1; }
+  #brand {
+    position:absolute; top:max(14px, env(safe-area-inset-top)); left:18px;
+    display:flex; flex-direction:column; gap:3px;
+  }
+  #brand .t { font-size:13px; letter-spacing:.42em; font-weight:700; color:#fff; }
+  #brand .s { font-size:8px; letter-spacing:.34em; color:#666; }
+  #track {
+    position:absolute; top:max(16px, env(safe-area-inset-top)); right:18px;
+    display:flex; align-items:center; gap:7px;
+    font-size:9px; letter-spacing:.3em; color:#555;
+    transition:color .3s;
+  }
+  #track i {
+    width:7px; height:7px; background:#333;
+    transition:background .2s, box-shadow .2s;
+  }
+  #track.on { color:#ddd; }
+  #track.on i { background:#fff; box-shadow:0 0 8px rgba(255,255,255,.9); }
+  #hint {
+    position:absolute; bottom:max(20px, env(safe-area-inset-bottom)); left:0; right:0;
+    text-align:center; font-size:10px; letter-spacing:.28em; color:#777;
+    transition:opacity 1.6s ease;
+  }
+  #hint.fade { opacity:0; }
+
+  /* ---- Start overlay ---- */
+  #overlay {
+    position:fixed; inset:0; z-index:10;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:26px; background:#000; text-align:center; padding:24px;
+    transition:opacity .7s ease;
+  }
+  #overlay.hidden { opacity:0; pointer-events:none; }
+  .sq { display:flex; gap:8px; height:12px; }
+  .sq i { width:10px; height:10px; background:#fff; animation:scatter 2.6s ease-in-out infinite alternate; }
+  .sq i:nth-child(2) { animation-delay:.45s; background:#999; }
+  .sq i:nth-child(3) { animation-delay:.9s; background:#555; }
+  @keyframes scatter {
+    0%   { transform:translate(0,0) rotate(0deg); }
+    55%  { transform:translate(0,0) rotate(0deg); }
+    100% { transform:translate(9px,-14px) rotate(135deg); opacity:.25; }
+  }
+  @media (prefers-reduced-motion: reduce) { .sq i { animation:none; } }
+  #overlay h1 { font-size:30px; letter-spacing:.5em; font-weight:700; text-indent:.5em; color:#fff; }
+  #overlay p { font-size:11.5px; letter-spacing:.2em; color:#888; line-height:2; }
+  #start {
+    pointer-events:auto; cursor:pointer;
+    background:transparent; color:#fff;
+    border:1px solid #fff; padding:15px 46px;
+    font-size:12px; letter-spacing:.4em; text-indent:.4em;
+    font-family:inherit;
+    transition:background .25s, color .25s;
+  }
+  #start:hover, #start:active { background:#fff; color:#000; }
+  #start:disabled { opacity:.45; cursor:default; background:transparent; color:#fff; }
+  #err { min-height:1em; font-size:10.5px; letter-spacing:.14em; color:#e46a6a; line-height:1.9; }
+</style>
+</head>
+<body>
+
+<div id="stage"><canvas id="view" width="640" height="480"></canvas></div>
+
+<div id="hud">
+  <div id="brand"><span class="t mono">DISSOLVE</span><span class="s mono">APARTMENT</span></div>
+  <div id="track" class="mono"><i></i>TRACKING</div>
+  <div id="hint" class="mono">手をかざして振る ／ パッと開くとはじける</div>
+</div>
+
+<div id="overlay">
+  <div class="sq"><i></i><i></i><i></i></div>
+  <h1>DISSOLVE</h1>
+  <p>カメラの前で手を振ると、映像が砕けて散らばる。<br>抜け落ちた場所は、やがて静かに戻ってくる。</p>
+  <button id="start" class="mono">START CAMERA</button>
+  <div id="err" class="mono"></div>
+</div>
+
+<video id="cam" playsinline muted autoplay></video>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+<script>
+(() => {
+'use strict';
+
+/* ================= 定数 ================= */
+const CW = 640, CH = 480;          // 内部解像度(軽量)
+const COLS = 48, ROWS = 36;        // モザイクのグリッド数
+const TW = CW / COLS, TH = CH / ROWS; // タイル寸法(13.33px)
+const MAX_P = 1800;                // パーティクル上限
+const GRAV = 230;                  // 重力 px/s^2
+const DRAG = 2.4;                  // 空気抵抗(指数減衰係数)
+const MINSP = 55;                  // 反応し始める手の速度 px/s
+const REGEN_MIN = 1.0, REGEN_VAR = 1.6; // 穴の回復時間(秒)ランダム幅
+
+const TIPS = [4, 8, 12, 16, 20];   // 指先ランドマーク
+const PALM = [0, 5, 9, 13, 17];    // 手のひら中心算出用
+
+/* ================= 要素 ================= */
+const video  = document.getElementById('cam');
+const canvas = document.getElementById('view');
+const ctx    = canvas.getContext('2d', { alpha:false });
+const gs     = document.createElement('canvas');   // グリッド解像度の縮小キャンバス
+gs.width = COLS; gs.height = ROWS;
+const gctx   = gs.getContext('2d', { willReadFrequently:true });
+
+const overlay = document.getElementById('overlay');
+const startBtn = document.getElementById('start');
+const errEl  = document.getElementById('err');
+const hud    = document.getElementById('hud');
+const trackEl = document.getElementById('track');
+const hintEl = document.getElementById('hint');
+
+/* ================= 状態 ================= */
+const holes = new Float32Array(COLS * ROWS); // 穴の残り時間(0=タイル健在)
+let img = null;                              // 縮小キャンバスのImageData(現フレームの色)
+let cover = { dw:CW, dh:CH, ox:0, oy:0 };    // カメラ映像→canvasのcoverマッピング
+let running = false;
+let latestHands = [];
+let lastResultT = -1e9;
+let started = false;
+
+/* パーティクル(固定プール) */
+const parts = new Array(MAX_P);
+const freeList = [];
+for (let i = 0; i < MAX_P; i++) {
+  parts[i] = { life:0, max:1, x:0, y:0, vx:0, vy:0, rot:0, rs:0, size:TW, col:'#fff' };
+  freeList.push(i);
+}
+
+/* 手スロット(最大2) */
+function makePoint(){ return { x:0, y:0, base:0.85 }; }
+function makeSlot(){
+  const pts = [];
+  const palm = makePoint(); palm.base = 1.5;  // 手のひらは判定半径大きめ
+  pts.push(palm);
+  for (let i = 0; i < 5; i++) pts.push(makePoint());
+  return { active:false, pts, open:1.2, lastBurst:-1e9 };
+}
+const slots = [ makeSlot(), makeSlot() ];
+
+/* ================= マッピング ================= */
+function updateCover(){
+  const vw = video.videoWidth || CW, vh = video.videoHeight || CH;
+  const sc = Math.max(CW / vw, CH / vh);           // coverで中央クロップ
+  cover.dw = vw * sc; cover.dh = vh * sc;
+  cover.ox = (CW - cover.dw) / 2; cover.oy = (CH - cover.dh) / 2;
+}
+/* MediaPipe正規化座標 → canvas座標(ミラー込み) */
+function lmX(lm){ return CW - (cover.ox + lm.x * cover.dw); }
+function lmY(lm){ return cover.oy + lm.y * cover.dh; }
+
+/* ================= タイル破壊 ================= */
+function spawn(gx, gy, vx, vy){
+  if (freeList.length === 0 || !img) return;
+  const i = gy * COLS + gx;
+  const o = i * 4, d = img.data;
+  const p = parts[freeList.pop()];
+  p.x = gx * TW + TW / 2;
+  p.y = gy * TH + TH / 2;
+  p.vx = vx; p.vy = vy;
+  p.rot = 0;
+  p.rs = (Math.random() - 0.5) * 11;
+  p.life = p.max = 0.9 + Math.random() * 0.9;
+  p.size = TW * 0.96;
+  p.col = 'rgb(' + d[o] + ',' + d[o+1] + ',' + d[o+2] + ')';
+  holes[i] = REGEN_MIN + Math.random() * REGEN_VAR;
+}
+
+/* 点(px,py)の周囲 半径r のタイルを弾き飛ばす */
+function stamp(px, py, r, vx, vy, radialK){
+  const cr = Math.ceil(r / TW);
+  const cx = Math.floor(px / TW), cy = Math.floor(py / TH);
+  const r2 = r * r;
+  for (let gy = cy - cr; gy <= cy + cr; gy++){
+    if (gy < 0 || gy >= ROWS) continue;
+    for (let gx = cx - cr; gx <= cx + cr; gx++){
+      if (gx < 0 || gx >= COLS) continue;
+      if (holes[gy * COLS + gx] > 0) continue;
+      const dx = gx * TW + TW / 2 - px;
+      const dy = gy * TH + TH / 2 - py;
+      const d2 = dx * dx + dy * dy;
+      if (d2 > r2) continue;
+      const d = Math.sqrt(d2) || 1;
+      const k = radialK * (50 + Math.random() * 150);
+      spawn(gx, gy,
+        vx * 0.5 + (dx / d) * k + (Math.random() - 0.5) * 60,
+        vy * 0.5 + (dy / d) * k + (Math.random() - 0.5) * 60);
+    }
+  }
+}
+
+/* 移動区間に沿ってスタンプ(速い動きでも軌跡が途切れない) */
+function sweep(x0, y0, x1, y1, vx, vy, baseTiles){
+  const sp = Math.hypot(vx, vy);
+  if (sp < MINSP) return;
+  const spN = Math.min(sp / 800, 1);
+  const r = TW * (baseTiles + spN * 2.2);
+  const dist = Math.hypot(x1 - x0, y1 - y0);
+  const steps = Math.max(1, Math.ceil(dist / (TW * 0.8)));
+  for (let s = 1; s <= steps; s++){
+    const t = s / steps;
+    stamp(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, r, vx, vy, 0.5 + spN);
+  }
+}
+
+/* 手を開いた瞬間の爆散 */
+function burst(px, py, vx, vy){
+  const r = TW * 6.2, r2 = r * r;
+  const cr = Math.ceil(r / TW);
+  const cx = Math.floor(px / TW), cy = Math.floor(py / TH);
+  for (let gy = cy - cr; gy <= cy + cr; gy++){
+    if (gy < 0 || gy >= ROWS) continue;
+    for (let gx = cx - cr; gx <= cx + cr; gx++){
+      if (gx < 0 || gx >= COLS) continue;
+      if (holes[gy * COLS + gx] > 0) continue;
+      const dx = gx * TW + TW / 2 - px;
+      const dy = gy * TH + TH / 2 - py;
+      const d2 = dx * dx + dy * dy;
+      if (d2 > r2) continue;
+      const d = Math.sqrt(d2) || 1;
+      const rv = 150 + Math.random() * 330;
+      spawn(gx, gy, vx * 0.35 + (dx / d) * rv, vy * 0.35 + (dy / d) * rv);
+    }
+  }
+}
+
+/* ================= 手の処理 ================= */
+function processHands(dt, now){
+  const stale = (now - lastResultT) > 600;   // トラッキング停止対策
+  let anyActive = false;
+
+  for (let s = 0; s < 2; s++){
+    const slot = slots[s];
+    const lm = (!stale && latestHands[s]) ? latestHands[s] : null;
+    if (!lm){ slot.active = false; continue; }
+    anyActive = true;
+
+    /* 目標座標:手のひら中心 + 指先5点 */
+    let tx = 0, ty = 0;
+    for (const idx of PALM){ tx += lmX(lm[idx]); ty += lmY(lm[idx]); }
+    const targets = [[tx / PALM.length, ty / PALM.length]];
+    for (const idx of TIPS) targets.push([lmX(lm[idx]), lmY(lm[idx])]);
+
+    /* 開き具合(指先と手首の平均距離 / 手のスケール) */
+    const wx = lmX(lm[0]), wy = lmY(lm[0]);
+    const scale = Math.hypot(lmX(lm[9]) - wx, lmY(lm[9]) - wy) || 1;
+    let od = 0;
+    for (const idx of TIPS) od += Math.hypot(lmX(lm[idx]) - wx, lmY(lm[idx]) - wy);
+    const openTarget = od / TIPS.length / scale;
+
+    if (!slot.active){
+      /* 出現直後:座標をリセットして偽の速度を防ぐ */
+      for (let i = 0; i < 6; i++){ slot.pts[i].x = targets[i][0]; slot.pts[i].y = targets[i][1]; }
+      slot.open = openTarget;
+      slot.active = true;
+      continue;
+    }
+
+    /* 各点:平滑化 → 速度算出 → 軌跡スタンプ */
+    const sm = Math.min(1, dt * 22);
+    for (let i = 0; i < 6; i++){
+      const p = slot.pts[i];
+      const ox = p.x, oy = p.y;
+      p.x += (targets[i][0] - p.x) * sm;
+      p.y += (targets[i][1] - p.y) * sm;
+      sweep(ox, oy, p.x, p.y, (p.x - ox) / dt, (p.y - oy) / dt, p.base);
+    }
+
+    /* 開くアクション検知 → バースト */
+    const prevOpen = slot.open;
+    slot.open += (openTarget - slot.open) * Math.min(1, dt * 14);
+    const rate = (slot.open - prevOpen) / dt;
+    if (rate > 3.0 && slot.open > 1.55 && now / 1000 - slot.lastBurst > 0.4){
+      slot.lastBurst = now / 1000;
+      const palm = slot.pts[0];
+      burst(palm.x, palm.y, 0, 0);
+    }
+  }
+  trackEl.classList.toggle('on', anyActive);
+}
+
+/* ================= メインループ ================= */
+let lastT = performance.now();
+function frame(now){
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+
+  if (!running || video.readyState < 2) return;
+
+  /* 1) カメラ映像 → 縮小キャンバス(ミラー・cover) */
+  updateCover();
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const sc = Math.max(COLS / vw, ROWS / vh);
+  gctx.setTransform(-1, 0, 0, 1, COLS, 0);   // 左右反転
+  gctx.drawImage(video, (COLS - vw * sc) / 2, (ROWS - vh * sc) / 2, vw * sc, vh * sc);
+  gctx.setTransform(1, 0, 0, 1, 0, 0);
+  img = gctx.getImageData(0, 0, COLS, ROWS);
+
+  /* 2) 手の判定・タイル破壊(現フレームの色を使う) */
+  processHands(dt, now);
+
+  /* 3) 全画面モザイク:縮小キャンバスを等倍拡大(1ドット=1タイル) */
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(gs, 0, 0, CW, CH);
+
+  /* 4) 穴:黒で塗る。残り0.22秒はフェードして元に戻る */
+  ctx.fillStyle = '#000';
+  for (let i = 0; i < holes.length; i++){
+    if (holes[i] <= 0) continue;
+    holes[i] -= dt;
+    if (holes[i] <= 0) continue;
+    ctx.globalAlpha = Math.min(1, holes[i] / 0.22);
+    ctx.fillRect((i % COLS) * TW, ((i / COLS) | 0) * TH, TW + 0.6, TH + 0.6);
+  }
+  ctx.globalAlpha = 1;
+
+  /* 5) パーティクル:物理更新して描画 */
+  const df = Math.exp(-DRAG * dt);
+  for (let i = 0; i < MAX_P; i++){
+    const p = parts[i];
+    if (p.life <= 0) continue;
+    p.life -= dt;
+    p.vx *= df;
+    p.vy = p.vy * df + GRAV * dt;
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.rot += p.rs * dt;
+    if (p.life <= 0 || p.y > CH + 40 || p.x < -40 || p.x > CW + 40){
+      p.life = 0; freeList.push(i); continue;
+    }
+    const lt = p.life / p.max;
+    const size = p.size * (0.55 + 0.45 * lt);
+    ctx.setTransform(1, 0, 0, 1, p.x, p.y);
+    ctx.rotate(p.rot);
+    ctx.globalAlpha = Math.min(1, lt / 0.35);
+    ctx.fillStyle = p.col;
+    ctx.fillRect(-size / 2, -size / 2, size, size);
+  }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
+}
+requestAnimationFrame(frame);
+
+/* ================= MediaPipe 起動 ================= */
+const hands = new Hands({
+  locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}`
+});
+hands.setOptions({
+  maxNumHands: 2,
+  modelComplexity: 0,           // 軽量モデル(モバイル向け)
+  minDetectionConfidence: 0.5,
+  minTrackingConfidence: 0.5
+});
+hands.onResults(res => {
+  latestHands = res.multiHandLandmarks || [];
+  lastResultT = performance.now();
+  if (!started){
+    started = true;
+    running = true;
+    overlay.classList.add('hidden');
+    hud.classList.add('show');
+    setTimeout(() => hintEl.classList.add('fade'), 6000);
+  }
+});
+
+startBtn.addEventListener('click', async () => {
+  startBtn.disabled = true;
+  startBtn.textContent = 'INITIALIZING…';
+  errEl.textContent = '';
+  try {
+    const camera = new Camera(video, {
+      onFrame: async () => { await hands.send({ image: video }); },
+      width: 640,
+      height: 480,
+      facingMode: 'user'
+    });
+    await camera.start();
+  } catch (e){
+    let msg = 'カメラを起動できませんでした。';
+    if (e && e.name === 'NotAllowedError') msg = 'カメラの使用が許可されませんでした。ブラウザの設定から許可してください。';
+    else if (e && e.name === 'NotFoundError') msg = 'カメラが見つかりませんでした。';
+    else if (e && e.name) msg += '(' + e.name + ')';
+    errEl.textContent = msg;
+    startBtn.disabled = false;
+    startBtn.textContent = 'START CAMERA';
+  }
+});
+
+})();
+</script>
+</body>
+</html>
